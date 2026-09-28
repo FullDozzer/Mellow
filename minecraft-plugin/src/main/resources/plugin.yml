@@ -1,0 +1,6 @@
+name: MellowBridge
+version: 0.1.0
+main: dev.mellow.plugin.MellowPlugin
+api-version: '1.20'
+author: Mellow
+description: Authenticated private API for Mellow whitelist operations
