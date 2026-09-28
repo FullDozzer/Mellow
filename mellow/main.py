@@ -21,7 +21,7 @@ async def main():
     logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     engine, session_factory = create_database(settings.database_url)
-    await create_schema(session_factory)
+    await create_schema(engine)
     await apply_staff_configuration(session_factory, settings)
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher()
