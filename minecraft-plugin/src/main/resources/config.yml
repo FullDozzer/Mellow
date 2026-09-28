@@ -1,0 +1,13 @@
+# Keep the API private. Prefer loopback when bot and server share a host.
+api:
+  bind: 127.0.0.1
+  port: 8765
+  # Generate with: openssl rand -hex 32. Must match MINECRAFT_API_TOKEN.
+  token: CHANGE_ME_TO_A_LONG_RANDOM_SECRET
+  allowed-ips:
+    - 127.0.0.1
+    - ::1
+  request-timeout-seconds: 10
+security:
+  # Username-to-profile lookup and stable UUID whitelist require online-mode.
+  require-online-mode: true

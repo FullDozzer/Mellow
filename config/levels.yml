@@ -1,0 +1,21 @@
+levels:
+  1:
+    name: Младший модератор
+    permissions: [warn, mute, applications, tickets]
+    max_punishment_seconds: 86400
+  2:
+    name: Модератор
+    permissions: [warn, mute, ban, kick, applications, tickets]
+    max_punishment_seconds: 604800
+  3:
+    name: Старший модератор
+    permissions: [warn, mute, ban, kick, unpunish, applications, tickets, suggestions]
+    max_punishment_seconds: 2592000
+  4:
+    name: Администратор
+    permissions: [warn, mute, ban, kick, unpunish, applications, tickets, suggestions, whitelist, settings]
+    max_punishment_seconds: 31536000
+  5:
+    name: Владелец
+    permissions: ['*']
+    max_punishment_seconds: 0

@@ -1,0 +1,19 @@
+questions:
+  - key: minecraft_username
+    label: Никнейм Minecraft
+    max_length: 16
+  - key: age
+    label: Возраст
+    max_length: 3
+  - key: region
+    label: Часовой пояс или регион
+    max_length: 80
+  - key: experience
+    label: Опыт игры
+    max_length: 500
+  - key: motivation
+    label: Почему ты хочешь присоединиться к Mellow?
+    max_length: 1000
+  - key: extra
+    label: Дополнительная информация (или «нет»)
+    max_length: 1000

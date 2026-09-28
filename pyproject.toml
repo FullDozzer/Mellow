@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mellow-telegram"
+version = "0.1.0"
+description = "Telegram community bot for the Mellow private Minecraft server"
+requires-python = ">=3.11"
+dependencies = [
+  "aiogram>=3.13,<4",
+  "SQLAlchemy[asyncio]>=2.0,<3",
+  "aiosqlite>=0.20",
+  "asyncpg>=0.29",
+  "aiohttp>=3.10,<4",
+  "PyYAML>=6.0",
+  "python-dotenv>=1.0",
+  "alembic>=1.13,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+mellow = "mellow.main:run"
+
+[tool.setuptools.packages.find]
+include = ["mellow*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
