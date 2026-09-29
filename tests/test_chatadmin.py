@@ -56,6 +56,11 @@ class AdminSession(RecordingSession):
         if name == "GetMe":
             self.calls.append(method)
             return SimpleNamespace(id=42, is_bot=True, first_name="Mellow", username="mellow_bot")
+        if name in {"CreateChatInviteLink", "ExportChatInviteLink"}:
+            self.calls.append(method)
+            return SimpleNamespace(invite_link="https://t.me/+mellow-test",
+                                   creates_join_request=bool(getattr(method, "creates_join_request",
+                                                                     False)))
         # Everything else goes to the recording session, which records it exactly once.
         return await super().make_request(bot, method, timeout)
 

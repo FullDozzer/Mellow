@@ -9,13 +9,16 @@ from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mellow.models import ChatSettings, CommandAccess, utcnow
+from mellow.models import ChatSettings, CommandAccess, UserCommandAccess, utcnow
 from mellow.services import staff_level
 
 # Commands whose minimum rank can be overridden per chat with «дк <команда> <ранг>».
+# Names follow the Iris documentation, so «дк бан 2» limits exactly the ban command.
 COMMANDS: dict[str, tuple[int, str]] = {
     "варны": (1, "предупреждения: выдача, снятие, список"),
-    "муты": (1, "муты: список и проверка"),
+    "муты": (1, "муты: выдача, снятие, список и проверка"),
+    "баны": (1, "бан, разбан, причина, банлист и амнистия"),
+    "кик": (1, "исключение участника"),
     "чистка": (2, "удаление сообщений, кик неактива, новичков и удалённых"),
     "настройки": (3, "фильтры, лимиты, приветствие и правила чата"),
     "триггеры": (4, "автоматические наказания"),
@@ -23,17 +26,54 @@ COMMANDS: dict[str, tuple[int, str]] = {
     "чаты": (1, "просмотр списка чатов сетки"),
     "статистика": (1, "статистика чата и участников"),
     "модер": (5, "назначение и снятие рангов"),
+    "доступ": (5, "настройка доступа команд"),
+    "завещание": (5, "наследство и передача создателя"),
+    "лдк": (5, "личный доступ команд"),
+    # Доступна всем по умолчанию, но её ранг тоже можно поднять: «дк мдк 2».
+    "мой дк": (0, "личный доступ: просмотр своих команд"),
 }
+
+# Уровень 6 отключает команду совсем, уровень 0 открывает её всем.
+DISABLED_LEVEL = 6
+PUBLIC_LEVEL = 0
 
 COMMAND_ALIASES = {
     "унб": "триггеры", "триги": "триггеры", "триггер": "триггеры",
     "настройка": "настройки", "настройка чата": "настройки",
     "сетка чатов": "сетка", "стата": "статистика", "статистика чата": "статистика",
-    "модерация": "модер", "ранги": "модер", "варн": "варны", "мут": "муты",
-    "чистка смс": "чистка", "удалить": "чистка", "кик": "чистка",
+    "модерация": "модер", "ранги": "модер",
+    "варн": "варны", "выдача варнов": "варны", "снятие варнов": "варны",
+    "предупреждения пользователя": "варны", "варнлист": "варны",
+    "мут": "муты", "выдача мута": "муты", "снятие мута": "муты", "проверить мут": "муты",
+    "список мутов": "муты",
+    "бан": "баны", "чс": "баны", "разбан": "баны", "вернуть": "баны", "банлист": "баны",
+    "причина бана": "баны", "амнистия": "баны",
+    "исключить": "кик",
+    "чистка смс": "чистка", "удалить": "чистка", "смс": "чистка", "пург": "чистка",
+    "кик неактив": "чистка", "кик актив": "чистка", "кик новичков": "чистка",
+    "кик удалённых": "чистка", "кик молчунов": "чистка", "кик по смс": "чистка",
+    "кик по сообщениям": "чистка", "кто удалён": "чистка", "кто собака": "чистка",
+    "закреп": "настройки", "открепить": "настройки", "название": "настройки",
+    "описание чата": "настройки", "правила": "настройки", "приветствие": "настройки",
+    "тг админ": "настройки", "тг тег": "настройки", "минрег": "настройки",
+    "автокик": "настройки", "автозаявки": "настройки", "каналы": "настройки",
+    "входы": "настройки", "выходы": "настройки", "проверить в чате": "настройки",
+    "вызов админов": "модер", "кто админ": "модер", "повысить": "модер",
+    "модер лог": "модер",
+    "вызов дк": "доступ", "дк": "доступ", "мой дк": "доступ", "лдк": "доступ",
+    "лог дк": "доступ", "сброс команд": "доступ",
+    "передать создателя": "завещание", "завещание": "завещание", "наследство": "завещание",
+    "установка сетки": "сетка", "все лдк": "лдк", "сброс лдк": "лдк",
+    "сброс всех лдк": "лдк", "входы-выходы": "настройки", "прикрепить": "настройки",
+    "снять мут": "муты", "говори": "муты", "закрепить": "настройки",
+    "чат ссылка": "настройки", "топик название": "настройки", "сброс ссылок": "настройки",
+    "тг права": "настройки", "тг разрешения чата": "настройки", "чат-ссылка": "настройки",
 }
 
 DEFAULT_LEVEL_WHEN_UNKNOWN = 5
+
+# Заполняется модулями команд: ключ команды -> его раздел «Доступ команд».
+COMMAND_GROUPS: dict[str, str] = {}
 
 
 def command_key(raw: str) -> str | None:
@@ -64,6 +104,19 @@ class ChatConfig:
     profanity_filter: bool = False
     show_charts: bool = True
     show_mod_tags: bool = False
+    notify_command_access: bool = True
+    channels_denied: bool = False
+    notify_joins: bool = False
+    notify_leaves: bool = False
+    leave_notify_min_messages: int = 0
+    minreg_days: int | None = None
+    closed_permissions: dict | None = None
+    autokick_count: int | None = None
+    autokick_window_seconds: int | None = None
+    autokick_action: str | None = None
+    auto_join_requests: bool = False
+    # «+Чат ссылка»: ссылки, созданные ботом, чтобы «сброс ссылок» мог их отозвать.
+    invite_links: list[str] = field(default_factory=list)
 
     @classmethod
     def from_row(cls, row: ChatSettings) -> "ChatConfig":
@@ -77,6 +130,13 @@ class ChatConfig:
             sticker_limit=row.sticker_limit, voice_denied=row.voice_denied,
             guest_bots_denied=row.guest_bots_denied, profanity_filter=row.profanity_filter,
             show_charts=row.show_charts, show_mod_tags=row.show_mod_tags,
+            notify_command_access=row.notify_command_access, channels_denied=row.channels_denied,
+            notify_joins=row.notify_joins, notify_leaves=row.notify_leaves,
+            leave_notify_min_messages=row.leave_notify_min_messages, minreg_days=row.minreg_days,
+            closed_permissions=row.closed_permissions, autokick_count=row.autokick_count,
+            autokick_window_seconds=row.autokick_window_seconds, autokick_action=row.autokick_action,
+            auto_join_requests=row.auto_join_requests,
+            invite_links=list(row.invite_links or []),
         )
 
 
@@ -144,12 +204,58 @@ class ChatSettingsStore:
 
 
 async def command_min_level(session: AsyncSession, chat_id: int, key: str) -> int:
-    override = await session.scalar(select(CommandAccess.min_level)
-                                    .where(CommandAccess.chat_id == chat_id, CommandAccess.command == key))
-    if override is not None:
-        return int(override)
-    entry = COMMANDS.get(key)
+    """The rank a command needs: its own override, its group's override, then the default."""
+    overrides = dict((await session.execute(select(CommandAccess.command, CommandAccess.min_level)
+                                            .where(CommandAccess.chat_id == chat_id))).all())
+    group = key_group_of(key)
+    if key in overrides:
+        return int(overrides[key])
+    if group and group in overrides:
+        return int(overrides[group])
+    entry = COMMANDS.get(key) or COMMANDS.get(group or "")
     return entry[0] if entry else DEFAULT_LEVEL_WHEN_UNKNOWN
+
+
+async def personal_access(session: AsyncSession, chat_id: int, telegram_id: int,
+                          key: str) -> bool | None:
+    """«Лдк»: ``True``/``False`` when the person has an exception for this command."""
+    row = await session.scalar(select(UserCommandAccess)
+                               .where(UserCommandAccess.chat_id == chat_id,
+                                      UserCommandAccess.telegram_id == telegram_id,
+                                      UserCommandAccess.command == key))
+    if row is not None:
+        return bool(row.allowed)
+    group = key_group_of(key)
+    if group and group != key:
+        row = await session.scalar(select(UserCommandAccess)
+                                   .where(UserCommandAccess.chat_id == chat_id,
+                                          UserCommandAccess.telegram_id == telegram_id,
+                                          UserCommandAccess.command == group))
+        if row is not None:
+            return bool(row.allowed)
+    return None
+
+
+async def set_personal_access(session: AsyncSession, chat_id: int, telegram_id: int, key: str,
+                              allowed: bool | None) -> None:
+    if allowed is None:
+        await session.execute(sql_delete(UserCommandAccess)
+                              .where(UserCommandAccess.chat_id == chat_id,
+                                     UserCommandAccess.telegram_id == telegram_id,
+                                     UserCommandAccess.command == key))
+        return
+    row = await session.get(UserCommandAccess, (chat_id, telegram_id, key))
+    if row is None:
+        session.add(UserCommandAccess(chat_id=chat_id, telegram_id=telegram_id, command=key,
+                                      allowed=allowed))
+    else:
+        row.allowed = allowed
+        row.updated_at = utcnow()
+
+
+def key_group_of(key: str) -> str | None:
+    """A leaf command belongs to the group its handlers declare (see the decorators)."""
+    return COMMAND_GROUPS.get(key)
 
 
 async def set_command_access(session: AsyncSession, chat_id: int, key: str, level: int | None) -> None:
@@ -166,16 +272,35 @@ async def set_command_access(session: AsyncSession, chat_id: int, key: str, leve
 
 
 async def may_use(session: AsyncSession, chat_id: int, telegram_id: int, key: str) -> tuple[bool, int, int]:
-    """``(allowed, actor_level, required_level)`` for a command in a given chat."""
+    """``(allowed, actor_level, required_level)`` for a command in a given chat.
+
+    Уровень 6 выключает команду, уровень 0 открывает её всем, а личный доступ
+    («+лдк»/«-лдк») важнее рангов: он и выдаёт исключение, и запрещает команду.
+    """
     level = await staff_level(session, telegram_id)
     required = await command_min_level(session, chat_id, key)
+    exception = await personal_access(session, chat_id, telegram_id, key)
+    if exception is not None:
+        return exception, level, required
+    if required > 5:
+        return False, level, required
+    if required <= 0:
+        return True, level, required
     return level >= required and level > 0, level, required
 
 
 def describe_access(key: str, required: int, default: int) -> str:
     title = COMMANDS.get(key, (default, ""))[1]
-    marker = "" if required == default else " (изменено)"
-    return f"<code>{key}</code> — от {required} уровня{marker}: {title}"
+    if required > 5:
+        marker = " (выключено)"
+        level_text = "выключено"
+    elif required <= 0:
+        marker = " (для всех)"
+        level_text = "для всех"
+    else:
+        marker = "" if required == default else " (изменено)"
+        level_text = f"от {required} уровня"
+    return f"<code>{key}</code> — {level_text}{marker}: {title}"
 
 
 def with_defaults(config: ChatConfig, **fields) -> ChatConfig:

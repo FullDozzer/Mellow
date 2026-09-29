@@ -28,6 +28,8 @@ class Staff(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     level: Mapped[int] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # «+Мой онлайн»: a moderator decides whether the staff list comments on his activity.
+    show_online: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -186,6 +188,26 @@ class ChatSettings(Base):
     profanity_filter: Mapped[bool] = mapped_column(Boolean, default=False)
     show_charts: Mapped[bool] = mapped_column(Boolean, default=True)
     show_mod_tags: Mapped[bool] = mapped_column(Boolean, default=False)
+    # «-Команды»: whether the bot explains that a command needs a higher rank.
+    notify_command_access: Mapped[bool] = mapped_column(Boolean, default=True)
+    # «+Каналы» / «-Каналы»: messages sent on behalf of a channel.
+    channels_denied: Mapped[bool] = mapped_column(Boolean, default=False)
+    # «+Входы» / «+Выходы»: the bot repeats the service messages Telegram hides in big chats.
+    notify_joins: Mapped[bool] = mapped_column(Boolean, default=False)
+    notify_leaves: Mapped[bool] = mapped_column(Boolean, default=False)
+    leave_notify_min_messages: Mapped[int] = mapped_column(Integer, default=0)
+    # «+Минрег {дней}»: kick members whose first interaction with the bot is younger than this.
+    minreg_days: Mapped[int | None] = mapped_column(Integer)
+    # «+Чат»: permissions that were in place before the chat was closed, to restore them later.
+    closed_permissions: Mapped[dict | None] = mapped_column(JSON)
+    # «+Автокик {число} {время} {кик|бан}»: punish repeated exits.
+    autokick_count: Mapped[int | None] = mapped_column(Integer)
+    autokick_window_seconds: Mapped[int | None] = mapped_column(Integer)
+    autokick_action: Mapped[str | None] = mapped_column(String(10))
+    # «+Чат ссылка»: links the bot created for this chat, so that «сброс ссылок» can revoke them.
+    invite_links: Mapped[list] = mapped_column(JSON, default=list)
+    # «+Автозаявки»: approve join requests automatically.
+    auto_join_requests: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -238,6 +260,8 @@ class ChatMemberActivity(Base):
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_member: Mapped[bool] = mapped_column(Boolean, default=True)
+    # «+Тг тег текст {ссылка}»: a personal note shown next to the name in bot messages.
+    tag: Mapped[str | None] = mapped_column(String(16))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -249,3 +273,34 @@ class DailyMessageStat(Base):
     day: Mapped[str] = mapped_column(String(10), primary_key=True)
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     attachment_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class CreatorWill(Base):
+    """«Завещание»: the person who may take over the rank if the creator loses access."""
+
+    __tablename__ = "creator_wills"
+    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    heir_telegram_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class UserCommandAccess(Base):
+    """«Личный доступ команд» («+лдк»): an exception for one person in one chat."""
+
+    __tablename__ = "user_command_access"
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    command: Mapped[str] = mapped_column(String(40), primary_key=True)
+    allowed: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ChatLeave(Base):
+    """Every exit is remembered so «+Автокик {число} {время}» can count them."""
+
+    __tablename__ = "chat_leaves"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(Integer, index=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, index=True)
+    left_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

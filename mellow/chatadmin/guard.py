@@ -241,7 +241,15 @@ class ChatGuard(BaseMiddleware):
         # Message itself as the event.
         message = event.message if hasattr(event, "message") else event
         bot = data.get("bot")
-        if (bot is not None and isinstance(message, Message) and message.sender_chat is None
+        if (bot is not None and isinstance(message, Message) and message.sender_chat is not None
+                and message.chat.type in {"group", "supergroup"}):
+            # Сообщения от имени канала не связаны с аккаунтом (принцип приватности), но
+            # «-Каналы» их удаляет: это действие модерации, а не хранение данных.
+            try:
+                await self._channels_filter(message, bot)
+            except Exception:
+                log.exception("Chat guard could not filter a channel message")
+        elif (bot is not None and isinstance(message, Message) and message.sender_chat is None
                 and message.from_user is not None and not message.from_user.is_bot
                 and message.chat.type in {"group", "supergroup"}):
             self.recent.remember(message.chat.id, message.message_id, message.from_user.id)
@@ -250,6 +258,20 @@ class ChatGuard(BaseMiddleware):
             except Exception:
                 log.exception("Chat guard could not inspect a message")
         return await handler(event, data)
+
+    async def _channels_filter(self, message, bot) -> None:
+        """«-Каналы»: удаляет сообщение от имени канала и блокирует сам канал в чате."""
+        config = await self.store.get(message.chat.id)
+        if not config.channels_denied or message.sender_chat.id == message.chat.id:
+            return
+        try:
+            await bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            log.info("Could not delete a channel message in chat %s", message.chat.id)
+        try:
+            await bot.ban_chat_sender_chat(message.chat.id, message.sender_chat.id)
+        except Exception:
+            log.info("Could not ban the sender channel in chat %s", message.chat.id)
 
     async def _staff_level_cached(self, telegram_id: int) -> int:
         cached = self._staff_cache.get(telegram_id)

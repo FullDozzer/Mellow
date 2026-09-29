@@ -72,6 +72,9 @@ class CommandTable:
         normalized = normalize_text(key)
         self._handlers[normalized] = (handler, key_group, public)
         self._keys_by_size.setdefault(len(normalized.split()), set()).add(normalized)
+        if key_group:
+            from mellow.chatadmin.config import COMMAND_GROUPS
+            COMMAND_GROUPS.setdefault(normalized, key_group)
 
     def resolve(self, text: str) -> tuple[str | None, list[str]]:
         words = text.split()
@@ -94,10 +97,13 @@ TABLE = CommandTable()
 
 
 def command(key: str, *, key_group: str | None = None, public: bool = False):
-    """Register a handler for a keyword; ``key_group`` is the «Доступ команд» key."""
+    """Register a handler for a keyword; ``key_group`` is its «Доступ команд» section."""
 
     def decorator(func):
         TABLE.add(key, func, key_group=key_group, public=public)
+        if key_group:
+            from mellow.chatadmin.config import COMMAND_GROUPS
+            COMMAND_GROUPS.setdefault(key, key_group)
         return func
     return decorator
 

@@ -12,10 +12,14 @@ from __future__ import annotations
 import html
 import logging
 
+from datetime import datetime, timedelta, timezone
+
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
+from sqlalchemy import select
 
 from mellow.chatadmin.admin_commands import *  # noqa: F401,F403 - registers handlers
+from mellow.chatadmin.community_commands import *  # noqa: F401,F403 - registers handlers
 from mellow.chatadmin.config import ChatSettingsStore, may_use
 from mellow.chatadmin.context import GROUP_TYPES, TABLE, ChatContext, strip_prefix
 from mellow.chatadmin.moderation_commands import *  # noqa: F401,F403 - registers handlers
@@ -43,14 +47,17 @@ async def handle_chat_command(message: Message, settings: Settings, session_fact
     async with session_factory() as session:
         level = await staff_level(session, message.from_user.id)
         if not public:
-            allowed, level, required = await may_use(session, message.chat.id, message.from_user.id,
-                                                     key_group or key)
+            allowed, level, required = await may_use(session, message.chat.id, message.from_user.id, key)
         else:
             allowed, required = True, 0
     if not allowed:
-        if level > 0:
-            await message.reply(f"Недостаточно прав: команда «{html.escape(key)}» доступна с {required} уровня "
-                                f"(сейчас у тебя {level}).", parse_mode="HTML")
+        config = await store.get(message.chat.id)
+        if config.notify_command_access:
+            if required > 5:
+                await message.reply("Эта команда выключена в чате.", parse_mode="HTML")
+            elif level > 0:
+                await message.reply(f"Недостаточно прав: команда «{html.escape(key)}» доступна с "
+                                    f"{required} уровня (сейчас у тебя {level}).", parse_mode="HTML")
         return True
     try:
         await store.remember_title(message.chat.id, message.chat.title)
@@ -79,6 +86,23 @@ async def chat_commands(message: Message, settings: Settings, session_factory, s
 # --------------------------------------------------------------------------------------
 # Подтверждение чистки, вход и выход участников
 # --------------------------------------------------------------------------------------
+
+@router.callback_query(F.data == "summon:delete")
+async def summon_callback(callback: CallbackQuery, session_factory, store: ChatSettingsStore):
+    """«➖ Удалить упоминания» у созыва модерации: убирает сообщение с упоминаниями."""
+    from mellow.services import staff_level
+    async with session_factory() as session:
+        level = await staff_level(session, callback.from_user.id)
+    if level <= 0:
+        await callback.answer("Созывать и удалять упоминания может только модерация.", show_alert=True)
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        await callback.answer("Не удалось удалить сообщение.", show_alert=True)
+        return
+    await callback.answer("Упоминания удалены")
+
 
 @router.callback_query(F.data.startswith("cleanup:"))
 async def cleanup_callback(callback: CallbackQuery, settings: Settings, session_factory,
@@ -121,11 +145,23 @@ async def on_new_members(message: Message, settings: Settings, session_factory, 
     await _track_members(message, session_factory, joined=True)
     config = await store.get(message.chat.id)
     await store.remember_title(message.chat.id, message.chat.title)
-    names = ", ".join(html.escape(user.full_name) for user in message.new_chat_members if not user.is_bot)
-    if names and config.welcome_text:
-        await bot.send_message(message.chat.id, f"{html.escape(config.welcome_text)}\n\n{names}",
-                               parse_mode="HTML")
-    if names and config.rules_text:
+    humans = [user for user in message.new_chat_members if not user.is_bot]
+    if config.minreg_days:
+        humans = await _apply_minreg(message.chat, humans, config, session_factory, bot)
+    if not humans:
+        return
+    tags = await _tags(session_factory, message.chat.id, [user.id for user in humans])
+    names = ", ".join(_display_name(user, tags.get(user.id)) for user in humans)
+    if config.notify_joins:
+        await bot.send_message(message.chat.id, f"🟢 {names} — вход в чат", parse_mode="HTML")
+    if config.welcome_text:
+        from mellow.chatadmin.welcome import render_welcome
+        greeting = render_welcome(config.welcome_text, full_name=humans[0].full_name,
+                                  plural=len(humans) > 1)
+        if len(humans) > 1:
+            greeting = f"{greeting}\n\n{names}"
+        await bot.send_message(message.chat.id, greeting, parse_mode="HTML")
+    if config.rules_text:
         await bot.send_message(message.chat.id, f"<b>Правила чата</b>\n{html.escape(config.rules_text)}",
                                parse_mode="HTML")
     async with session_factory() as session:
@@ -147,18 +183,113 @@ async def on_new_members(message: Message, settings: Settings, session_factory, 
                                    reason=action.get("reason"), actor_id=None)
 
 
+def _display_name(user, tag: str | None) -> str:
+    """Имя участника с личным тегом («+тг тег»), как в документации Ириса."""
+    name = html.escape(user.full_name)
+    return f"{name} <i>[{html.escape(tag)}]</i>" if tag else name
+
+
+async def _tags(session_factory, chat_id: int, telegram_ids: list[int]) -> dict[int, str]:
+    from mellow.models import ChatMemberActivity
+    if not telegram_ids:
+        return {}
+    async with session_factory() as session:
+        rows = (await session.scalars(select(ChatMemberActivity)
+                                      .where(ChatMemberActivity.chat_id == chat_id,
+                                             ChatMemberActivity.telegram_id.in_(telegram_ids)))).all()
+    return {row.telegram_id: row.tag for row in rows if row.tag}
+
+
+async def _apply_minreg(chat, users, config, session_factory, bot) -> list:
+    """«+Минрег»: исключает участников, которые знают бота меньше указанного срока."""
+    from mellow.models import User, utcnow
+    from mellow.moderation import perform_telegram_action
+    kept = []
+    async with session_factory() as session:
+        rows = {user.telegram_id: user for user in (await session.scalars(
+            select(User).where(User.telegram_id.in_([user.id for user in users])))).all()}
+    cutoff = utcnow() - timedelta(days=config.minreg_days)
+    for user in users:
+        stored = rows.get(user.id)
+        created = stored.created_at if stored is not None else None
+        if created is None:
+            kept.append(user)  # о человеке ничего не известно — не наказываем без данных
+            continue
+        moment = created if created.tzinfo else created.replace(tzinfo=cutoff.tzinfo)
+        if moment <= cutoff:
+            kept.append(user)
+            continue
+        try:
+            await perform_telegram_action(bot, chat.id, "кик", user.id)
+        except Exception:
+            log.info("Minreg could not kick %s in chat %s", user.id, chat.id)
+    return kept
+
+
+async def _handle_leave(chat, user, session_factory, store, settings, bot) -> None:
+    """Общий обработчик выхода: уведомление, запись выхода и автокик."""
+    from mellow.models import ChatLeave, MessageStat, User, utcnow
+    if user is None or user.is_bot:
+        return
+    config = await store.get(chat.id)
+    async with session_factory() as session, session.begin():
+        session.add(ChatLeave(chat_id=chat.id, telegram_id=user.id, left_at=utcnow()))
+    if config.notify_leaves:
+        message_count = 0
+        async with session_factory() as session:
+            row = await session.scalar(select(MessageStat.message_count)
+                                       .join(User, MessageStat.user_id == User.id)
+                                       .where(User.telegram_id == user.id))
+            message_count = int(row or 0)
+        if message_count >= (config.leave_notify_min_messages or 0):
+            await bot.send_message(chat.id, f"⚪ {html.escape(user.full_name)} — выход из чата",
+                                   parse_mode="HTML")
+    if not config.autokick_count:
+        return
+    from mellow.moderation import apply_punishment
+    from mellow.services import deactivate_punishments  # noqa: F401 - keeps the import local
+    window = timedelta(seconds=config.autokick_window_seconds or 3600)
+    async with session_factory() as session:
+        rows = (await session.scalars(select(ChatLeave)
+                                      .where(ChatLeave.chat_id == chat.id,
+                                             ChatLeave.telegram_id == user.id))).all()
+    recent = [row for row in rows if _aware(row.left_at) >= utcnow() - window]
+    if len(recent) < config.autokick_count:
+        return
+    async with session_factory() as session, session.begin():
+        for row in rows:
+            await session.delete(row)
+    action = "бан" if (config.autokick_action or "кик") == "бан" else "кик"
+    await apply_punishment(bot, session_factory, chat_id=chat.id, target_id=user.id, action=action,
+                           duration=None, reason="Автокик: частые выходы", actor_id=None)
+
+
+def _aware(value) -> datetime:
+    if value is None:
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 @router.message(F.left_chat_member)
-async def on_left_member(message: Message, session_factory):
+async def on_left_member(message: Message, settings: Settings, session_factory, store: ChatSettingsStore,
+                         bot: Bot):
     await _track_members(message, session_factory, joined=False)
+    await _handle_leave(message.chat, message.left_chat_member, session_factory, store, settings, bot)
 
 
 @router.chat_member()
-async def on_membership_change(update: ChatMemberUpdated, session_factory):
+async def on_membership_change(update: ChatMemberUpdated, settings: Settings, session_factory,
+                               store: ChatSettingsStore, bot: Bot):
     """Joins and leaves are recorded even when the chat hides service messages."""
     member = update.new_chat_member
     if member is None or member.user.is_bot:
         return
     joined = member.status in {"member", "administrator", "creator", "restricted"}
+    previous = update.old_chat_member
+    was_joined = previous is not None and previous.status in {"member", "administrator", "creator",
+                                                              "restricted"}
+    if was_joined and not joined:
+        await _handle_leave(update.chat, member.user, session_factory, store, settings, bot)
     async with session_factory() as session, session.begin():
         from mellow.models import ChatMemberActivity, utcnow
         row = await session.get(ChatMemberActivity, (update.chat.id, member.user.id))
@@ -171,3 +302,19 @@ async def on_membership_change(update: ChatMemberUpdated, session_factory):
             if joined and row.joined_at is None:
                 row.joined_at = utcnow()
             row.updated_at = utcnow()
+
+
+@router.chat_join_request()
+async def on_join_request(update, settings: Settings, session_factory, store: ChatSettingsStore, bot: Bot):
+    """«+Автозаявки»: принимает заявки на вступление автоматически."""
+    config = await store.get(update.chat.id)
+    if not config.auto_join_requests:
+        return
+    try:
+        await bot.approve_chat_join_request(update.chat.id, update.from_user.id)
+    except Exception:
+        log.info("Could not approve a join request in chat %s", update.chat.id)
+        return
+    from mellow.chatadmin.admin_commands import _remember_members
+    async with session_factory() as session, session.begin():
+        await _remember_members(session, update.chat.id, [update.from_user.id], True)

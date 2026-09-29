@@ -20,10 +20,33 @@ branch_labels = None
 depends_on = None
 
 NEW_TABLES = {"chat_settings", "triggers", "command_access", "grid_chats", "chat_members",
-              "daily_message_stats"}
+              "daily_message_stats", "creator_wills", "user_command_access", "chat_leaves"}
 
+# Columns added to tables of the previous revision, with the index to create for them.
 NEW_COLUMNS = {
-    "punishments": ("chat_id", sa.Integer(), "ix_punishments_chat_id"),
+    "punishments": (
+        ("chat_id", sa.Integer(), "ix_punishments_chat_id"),
+    ),
+    "staff": (
+        ("show_online", sa.Boolean(), None),
+    ),
+    "chat_settings": (
+        ("notify_command_access", sa.Boolean(), None),
+        ("channels_denied", sa.Boolean(), None),
+        ("notify_joins", sa.Boolean(), None),
+        ("notify_leaves", sa.Boolean(), None),
+        ("leave_notify_min_messages", sa.Integer(), None),
+        ("minreg_days", sa.Integer(), None),
+        ("closed_permissions", sa.JSON(), None),
+        ("autokick_count", sa.Integer(), None),
+        ("autokick_window_seconds", sa.Integer(), None),
+        ("autokick_action", sa.String(10), None),
+        ("auto_join_requests", sa.Boolean(), None),
+        ("invite_links", sa.JSON(), None),
+    ),
+    "chat_members": (
+        ("tag", sa.String(16), None),
+    ),
 }
 
 
@@ -41,20 +64,36 @@ def _existing_indexes(table: str) -> set[str]:
     return {index["name"] for index in inspector.get_indexes(table)}
 
 
+def _has_table(table: str) -> bool:
+    return table in sa.inspect(op.get_bind()).get_table_names()
+
+
 def upgrade():
     Base.metadata.create_all(bind=op.get_bind(), tables=[Base.metadata.tables[name] for name in NEW_TABLES])
-    for table, (column, column_type, index) in NEW_COLUMNS.items():
-        if column in _existing_columns(table):
+    for table, columns in NEW_COLUMNS.items():
+        if not _has_table(table):
+            # Таблицы ещё нет (её создаст create_all выше или она появится позже) — колонки не нужны.
             continue
-        op.add_column(table, sa.Column(column, column_type, nullable=True))
-        if index not in _existing_indexes(table):
-            op.create_index(index, table, [column])
+        existing = _existing_columns(table)
+        indexes = _existing_indexes(table)
+        for column, column_type, index in columns:
+            if column in existing:
+                continue
+            op.add_column(table, sa.Column(column, column_type, nullable=True))
+            if index and index not in indexes:
+                op.create_index(index, table, [column])
 
 
 def downgrade():
-    for table, (column, _type, index) in NEW_COLUMNS.items():
-        if column in _existing_columns(table):
-            if index in _existing_indexes(table):
+    for table, columns in NEW_COLUMNS.items():
+        if not _has_table(table):
+            continue
+        existing = _existing_columns(table)
+        indexes = _existing_indexes(table)
+        for column, _type, index in columns:
+            if column not in existing:
+                continue
+            if index and index in indexes:
                 op.drop_index(index, table_name=table)
             op.drop_column(table, column)
     Base.metadata.drop_all(bind=op.get_bind(), tables=[Base.metadata.tables[name] for name in NEW_TABLES])

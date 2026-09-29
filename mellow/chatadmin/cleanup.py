@@ -23,10 +23,13 @@ log = logging.getLogger("mellow.cleanup")
 
 TELEGRAM_DELETE_LIMIT = 100
 TELEGRAM_DELETE_AGE = timedelta(hours=48)
-KICK_KINDS = {"кик неактив", "кик актив", "кик новичков", "кик удалённых"}
+KICK_KINDS = {"кик неактив", "кик актив", "кик новичков", "кик удалённых", "кик молчунов",
+              "кик по смс"}
 DEFAULT_INACTIVE_DAYS = 30
 DEFAULT_ACTIVE_DAYS = 30
 DEFAULT_NEWCOMER_DAYS = 1
+DEFAULT_SILENT_DAYS = 7
+DEFAULT_SMS_PERIOD_DAYS = 7
 
 
 @dataclass
@@ -55,10 +58,23 @@ async def plan_message_cleanup(chat_id: int, message_ids: list[int]) -> CleanupP
     return CleanupPlan("удалить", chat_id, summary, message_ids=actionable, skipped_old=skipped)
 
 
-async def plan_member_cleanup(session: AsyncSession, chat_id: int, kind: str, days: int | None) -> CleanupPlan:
+async def plan_member_cleanup(session: AsyncSession, chat_id: int, kind: str, days: int | None,
+                               count: int | None = None, min_messages: int | None = None) -> CleanupPlan:
+    """Plan a kick.
+
+    ``days`` is a period, ``count`` is «сколько самых неактивных исключить»
+    (документация Ириса различает «кик неактив 10» и «кик неактив 2 месяца»),
+    ``min_messages`` is the threshold of «кик по смс».
+    """
     members = list((await session.scalars(select(ChatMemberActivity)
                                           .where(ChatMemberActivity.chat_id == chat_id,
                                                  ChatMemberActivity.is_member.is_(True)))).all())
+    if kind == "кик неактив" and count:
+        ordered = sorted(members, key=lambda m: _aware(m.last_message_at) if m.last_message_at
+                         else datetime(1970, 1, 1, tzinfo=timezone.utc))
+        targets = [m.telegram_id for m in ordered[:count]]
+        return CleanupPlan(kind, chat_id, f"Кик самых неактивных: найдено {len(targets)}",
+                           targets=targets)
     if kind == "кик неактив":
         cutoff = _cutoff(days or DEFAULT_INACTIVE_DAYS)
         targets = [m.telegram_id for m in members
@@ -77,9 +93,37 @@ async def plan_member_cleanup(session: AsyncSession, chat_id: int, kind: str, da
     elif kind == "кик удалённых":
         targets = [m.telegram_id for m in members]
         label = "Проверка вышедших участников"
+    elif kind == "кик молчунов":
+        cutoff = _cutoff(days or DEFAULT_SILENT_DAYS)
+        targets = [m.telegram_id for m in members
+                   if m.last_message_at is None and m.joined_at is not None
+                   and _aware(m.joined_at) < cutoff]
+        label = f"Кик молчунов (в чате дольше {(days or DEFAULT_SILENT_DAYS)} дн. без сообщений)"
+    elif kind == "кик по смс":
+        window = days or DEFAULT_SMS_PERIOD_DAYS
+        threshold = min_messages or 10
+        cutoff = _cutoff(window)
+        counts = await _member_message_counts(session, [m.telegram_id for m in members])
+        # Счётчик Mellow ведётся с момента первого сообщения, поэтому проверяем тех, кто
+        # был в чате весь период: у остальных не было времени написать норму.
+        targets = [m.telegram_id for m in members
+                   if m.joined_at is not None and _aware(m.joined_at) <= cutoff
+                   and counts.get(m.telegram_id, 0) < threshold]
+        label = f"Кик по смс (меньше {threshold} сообщений, в чате дольше {window} дн.)"
     else:
         raise ValueError(kind)
     return CleanupPlan(kind, chat_id, f"{label}: найдено {len(targets)}", targets=targets)
+
+
+async def _member_message_counts(session: AsyncSession, telegram_ids: list[int]) -> dict[int, int]:
+    """Messages in the counter for the given people (тексты сообщений не хранятся)."""
+    from mellow.models import MessageStat, User
+    if not telegram_ids:
+        return {}
+    rows = (await session.execute(select(User.telegram_id, MessageStat.message_count)
+                                  .join(MessageStat, MessageStat.user_id == User.id)
+                                  .where(User.telegram_id.in_(telegram_ids)))).all()
+    return {int(telegram_id): int(count) for telegram_id, count in rows}
 
 
 def _aware(value: datetime) -> datetime:

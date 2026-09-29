@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from mellow.chatadmin.context import (ChatContext, command, extract_target, parse_leading_period,
                                       resolve_user_id)
-from mellow.models import AuditLog, Punishment, Staff, User, utcnow
+from mellow.models import AuditLog, ChatMemberActivity, Punishment, Staff, User, utcnow
 from mellow.moderation import (active_warnings, apply_punishment, cap_duration, describe_period,
                                parse_period, perform_telegram_action, punishment_active,
                                punishment_summary, warning_is_active)
@@ -36,10 +36,21 @@ async def target_or_reply(ctx: ChatContext, *, missing: str = "Укажи пол
     return target_id
 
 
+COOLDOWN_WORDS = {"остыть", "остынь", "остывает"}
+COOLDOWN_SECONDS = 600
+
+
 def period_and_text(ctx: ChatContext) -> tuple[int | None, str | None, str | None, list[str]]:
-    """Split arguments into ``(seconds, period_text, target_raw, leftover_words)``."""
+    """Split arguments into ``(seconds, period_text, target_raw, leftover_words)``.
+
+    «Варн остыть @ник» («чс остыть», «мут остыть») is the documented short form for a
+    ten-minute punishment, so the word «остыть» stands for «10 минут».
+    """
     rest = list(ctx.args)
     reference, rest = extract_target(rest)
+    # «варн остыть» — это отдельный ключ команды, поэтому слово «остыть» проверяется и здесь.
+    if ctx.command.endswith("остыть") or (rest and rest[0].lower() in COOLDOWN_WORDS):
+        return COOLDOWN_SECONDS, "10 минут", reference, rest[1:] if rest else rest
     seconds, token, consumed = parse_leading_period(rest)
     return seconds, token, reference, rest[consumed:]
 
@@ -186,6 +197,10 @@ async def cmd_resign(ctx: ChatContext):
 
 
 @command("восстановить создателя", key_group="модер")
+@command("восстановить владельца", key_group="модер")
+@command("восстановить права", key_group="модер")
+@command("хозяин вернулся", key_group="модер")
+@command("хв", key_group="модер")
 async def cmd_restore_creator(ctx: ChatContext):
     try:
         member = await ctx.bot.get_chat_member(ctx.chat_id, ctx.actor_id)
@@ -212,6 +227,11 @@ async def cmd_restore_creator(ctx: ChatContext):
 
 
 @command("кто админ", key_group="модер", public=True)
+@command("а судьи кто", key_group="модер", public=True)
+@command("кто здесь власть", key_group="модер", public=True)
+@command("staff", key_group="модер", public=True)
+@command("управляющие", key_group="модер", public=True)
+@command("админы", key_group="модер", public=True)
 async def cmd_staff_list(ctx: ChatContext):
     async with ctx.session_factory() as session:
         rows = (await session.execute(select(User.telegram_id, User.username, Staff.level)
@@ -221,16 +241,30 @@ async def cmd_staff_list(ctx: ChatContext):
     if not rows:
         await ctx.reply("Администрация не назначена.")
         return
+    from mellow.chatadmin.community_commands import online_marker
+
+    async with ctx.session_factory() as session:
+        staff_rows = (await session.scalars(select(Staff).where(Staff.active.is_(True)))).all()
+        users = {user.id: user for user in (await session.scalars(select(User))).all()}
+        activity = {row.telegram_id: row.last_message_at for row in
+                    (await session.scalars(select(ChatMemberActivity)
+                                           .where(ChatMemberActivity.chat_id == ctx.chat_id))).all()}
+    show_online = {user.telegram_id: staff.show_online
+                   for staff in staff_rows if (user := users.get(staff.user_id))}
     lines = ["<b>Администрация</b>"]
     for telegram_id, username, level in rows:
         try:
             member = await ctx.bot.get_chat_member(ctx.chat_id, telegram_id)
-            mark = "➖" if member.status in {"left", "kicked"} else "🟢"
+            status = member.status
         except Exception:
-            mark = "⚪️"
+            status = "unknown"
+        if status == "unknown" or not show_online.get(telegram_id, False):
+            mark = "➖" if status in {"left", "kicked"} else "⚪"
+        else:
+            mark = online_marker(status, activity.get(telegram_id))
         lines.append(f"{mark} {level} · {html.escape(rank_title(level, ctx.settings))} — "
                      f"{html.escape(username and '@' + username or str(telegram_id))}")
-    lines.append("\n🟢 в чате · ⚪️ неизвестно · ➖ вышел из чата")
+    lines.append("\n🟢 в сети · ⚪ не в сети · ➖ не в чате (статус показывает «+мой онлайн»)")
     await ctx.reply("\n".join(lines))
 
 
@@ -243,20 +277,55 @@ async def cmd_my_rank(ctx: ChatContext):
 
 
 @command("модер лог", key_group="модер")
+@command("мой модер лог", key_group="модер")
+@command("твой модер лог", key_group="модер")
+@command("модер лог от", key_group="модер")
 async def cmd_rank_log(ctx: ChatContext):
+    """«Модер лог», «Мой модер лог», «Твой модер лог {ссылка}», «Модер лог от {ссылка}»."""
+    target_id = actor_id = None
+    if ctx.command == "мой модер лог":
+        target_id = ctx.actor_id
+    elif ctx.command == "модер лог от":
+        actor_id = await target_from(ctx)
+    else:
+        target_id = await target_from(ctx)
     async with ctx.session_factory() as session:
-        rows = list((await session.scalars(select(AuditLog)
-                                           .where(AuditLog.action.in_(("staff_level_set", "staff_removed",
-                                                                       "staff_resigned", "staff_removed_all")))
-                                           .order_by(AuditLog.id.desc()).limit(15))).all())
+        query = select(AuditLog).where(AuditLog.action.in_(("staff_level_set", "staff_removed",
+                                                            "staff_resigned", "staff_removed_all")))
+        if target_id is not None:
+            query = query.where(AuditLog.target_ref == f"telegram:{target_id}")
+        if actor_id is not None:
+            query = query.where(AuditLog.actor_id == actor_id)
+        rows = list((await session.scalars(query.order_by(AuditLog.id.desc()).limit(15))).all())
+        names = await _log_names(session, rows)
     if not rows:
-        await ctx.reply("Изменений рангов пока не было.")
+        await ctx.reply("Изменений рангов по этому запросу не найдено.")
         return
-    lines = ["<b>Последние изменения рангов</b>"]
+    lines = ["<b>Изменения рангов</b>"]
     for row in rows:
-        actor = f"<code>{row.actor_id}</code>" if row.actor_id else "автоматически"
-        lines.append(f"#{row.id} {row.action} · {html.escape(str(row.target_ref))} · {actor}")
+        actor = html.escape(names.get(int(row.actor_id), str(row.actor_id))) if row.actor_id else "автоматически"
+        target = html.escape(names.get(_telegram_id_of(row.target_ref), str(row.target_ref)))
+        lines.append(f"#{row.id} {row.action} · {target} · {actor}")
     await ctx.reply("\n".join(lines))
+
+
+def _telegram_id_of(reference: str | None) -> int:
+    if reference and reference.startswith("telegram:"):
+        tail = reference.split(":", 1)[1]
+        if tail.lstrip("-").isdigit():
+            return int(tail)
+    return 0
+
+
+async def _log_names(session, rows) -> dict[int, str]:
+    wanted = {int(row.actor_id) for row in rows if row.actor_id}
+    wanted |= {_telegram_id_of(row.target_ref) for row in rows}
+    wanted.discard(0)
+    if not wanted:
+        return {}
+    users = (await session.scalars(select(User).where(User.telegram_id.in_(wanted)))).all()
+    return {user.telegram_id: (f"@{user.username}" if user.username else str(user.telegram_id))
+            for user in users}
 
 
 # --------------------------------------------------------------------------------------
@@ -265,6 +334,9 @@ async def cmd_rank_log(ctx: ChatContext):
 
 @command("варн", key_group="варны")
 @command("пред", key_group="варны")
+@command("предупреждение", key_group="варны")
+@command("warn", key_group="варны")
+@command("варн остыть", key_group="варны")
 async def cmd_warn(ctx: ChatContext):
     duration, token, reference, rest = period_and_text(ctx)
     target_id = await resolve_user_id(ctx.session_factory, reference, ctx.reply_target)
@@ -475,7 +547,10 @@ async def remove_punishment(ctx: ChatContext, target_id: int, action: str) -> in
     return len(ids)
 
 
-@command("мут", key_group="варны")
+@command("мут", key_group="муты")
+@command("заткнуть", key_group="муты")
+@command("mute", key_group="муты")
+@command("мут остыть", key_group="муты")
 async def cmd_mute(ctx: ChatContext):
     duration, token, reference, rest = period_and_text(ctx)
     target_id = await resolve_user_id(ctx.session_factory, reference, ctx.reply_target)
@@ -499,9 +574,11 @@ async def cmd_mute(ctx: ChatContext):
                     + (f"\nПричина: {html.escape(reason)}" if reason else "") + actor_tag(ctx, config))
 
 
-@command("-мут", key_group="варны")
-@command("размут", key_group="варны")
-@command("unmute", key_group="варны")
+@command("-мут", key_group="муты")
+@command("размут", key_group="муты")
+@command("снять мут", key_group="муты")
+@command("говори", key_group="муты")
+@command("unmute", key_group="муты")
 async def cmd_unmute(ctx: ChatContext):
     target_id = await target_or_reply(ctx)
     if target_id is None:
@@ -541,8 +618,11 @@ async def cmd_check_mute(ctx: ChatContext):
     await ctx.reply(f"<code>{target_id}</code>: " + ("в муте." if restricted else "может писать."))
 
 
-@command("бан", key_group="варны")
-@command("чс", key_group="варны")
+@command("бан", key_group="баны")
+@command("чс", key_group="баны")
+@command("чс остыть", key_group="баны")
+@command("ban", key_group="баны")
+@command("permban", key_group="баны")
 async def cmd_ban(ctx: ChatContext):
     duration, token, reference, rest = period_and_text(ctx)
     target_id = await resolve_user_id(ctx.session_factory, reference, ctx.reply_target)
@@ -567,8 +647,10 @@ async def cmd_ban(ctx: ChatContext):
                     + (f"\nПричина: {html.escape(reason)}" if reason else "") + actor_tag(ctx, config))
 
 
-@command("-бан", key_group="варны")
-@command("разбан", key_group="варны")
+@command("-бан", key_group="баны")
+@command("разбан", key_group="баны")
+@command("вернуть", key_group="баны")
+@command("unban", key_group="баны")
 async def cmd_unban(ctx: ChatContext):
     target_id = await target_or_reply(ctx)
     if target_id is None:
@@ -578,7 +660,7 @@ async def cmd_unban(ctx: ChatContext):
         await ctx.reply(f"Бан снят с <code>{target_id}</code>.")
 
 
-@command("банлист", key_group="муты")
+@command("банлист", key_group="баны")
 async def cmd_ban_list(ctx: ChatContext):
     async with ctx.session_factory() as session:
         rows = list((await session.scalars(select(Punishment)
@@ -607,6 +689,7 @@ async def cmd_mute_period(ctx: ChatContext):
 
 
 @command("бан период", key_group="настройки")
+@command("причина бана", key_group="баны")
 async def cmd_ban_period(ctx: ChatContext):
     if not ctx.args:
         await ctx.reply("Формат: бан период 7 дней (или «бан период навсегда»).")
@@ -624,8 +707,9 @@ async def cmd_mod_tags(ctx: ChatContext):
     await ctx.reply("Теги модератора в ответах: " + ("включены." if enabled else "выключены."))
 
 
-@command("кик", key_group="варны")
-@command("исключить", key_group="варны")
+@command("кик", key_group="кик")
+@command("исключить", key_group="кик")
+@command("kick", key_group="кик")
 async def cmd_kick_member(ctx: ChatContext):
     """«кик @ник [причина]» — ban+unban in one step (the member can come back)."""
     _, _, reference, rest = period_and_text(ctx)
