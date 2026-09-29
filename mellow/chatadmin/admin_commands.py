@@ -17,8 +17,9 @@ from mellow.chatadmin import stats as chat_stats
 from mellow.chatadmin.cleanup import (TELEGRAM_DELETE_LIMIT, CleanupPlan, delete_messages, kick_members,
                                       plan_member_cleanup, plan_message_cleanup,
                                       purge_inactive_punishments)
-from mellow.chatadmin.config import (COMMANDS, DISABLED_LEVEL, PUBLIC_LEVEL, command_key,
-                                     command_min_level, set_command_access, set_personal_access)
+from mellow.chatadmin.config import (COMMAND_GROUPS, COMMANDS, DISABLED_LEVEL, PUBLIC_LEVEL,
+                                     command_key, command_min_level, set_command_access,
+                                     set_personal_access)
 from mellow.chatadmin.context import TABLE, ChatContext, command, extract_target, resolve_user_id
 from mellow.chatadmin.grid import (grid_chat_ids, grid_of_chat, grid_rows, remove_from_grid, set_grid)
 from mellow.chatadmin.triggers import (EVENTS, MAX_ACTIONS, delete_trigger, list_triggers, parse_actions,
@@ -458,22 +459,29 @@ async def _set_access_for_key(ctx: ChatContext, key: str, args: list[str]) -> No
     await _set_access(ctx, key, args[0])
 
 
+def _personal_mark(level: int, required: int) -> str:
+    if required > 5:
+        return "❌"
+    return "✅" if level >= required and (level > 0 or required <= 0) else "⛔"
+
+
 @command("мой дк", key_group="доступ")
 @command("мой доступ команд", key_group="доступ")
 @command("мдк", key_group="доступ")
 async def cmd_my_access(ctx: ChatContext):
     """«Мой доступ команд»: что доступно лично тебе."""
     async with ctx.session_factory() as session:
-        lines = ["<b>Мой доступ команд</b>", f"Твой ранг: {ctx.actor_level}"]
-        for key, (default, title) in COMMANDS.items():
+        lines = ["<b>Мой доступ команд</b>", f"Твой ранг: {ctx.actor_level}", ""]
+        for key, (_default, title) in COMMANDS.items():
             required = await command_min_level(session, ctx.chat_id, key)
-            if required > 5:
-                mark = "❌"
-            elif ctx.actor_level >= required and (ctx.actor_level > 0 or required <= 0):
-                mark = "✅"
-            else:
-                mark = "⛔"
+            mark = _personal_mark(ctx.actor_level, required)
             lines.append(f"{mark} <code>{key}</code> — {html.escape(title)}")
+            for command_key, (_level, command_title) in COMMANDS.items():
+                if COMMAND_GROUPS.get(command_key) != key:
+                    continue
+                command_required = await command_min_level(session, ctx.chat_id, command_key)
+                lines.append(f"    {_personal_mark(ctx.actor_level, command_required)} "
+                             f"<code>{command_key}</code> — {html.escape(command_title)}")
     lines.append("\n✅ доступно · ⛔ нужен ранг выше · ❌ выключено")
     await ctx.reply("\n".join(lines))
 
@@ -493,19 +501,29 @@ async def cmd_access_toggle(ctx: ChatContext):
     await _set_access(ctx, key, str(level))
 
 
+def _access_state(required: int) -> str:
+    if required > 5:
+        return "❌ выключено"
+    if required <= 0:
+        return "✅ для всех"
+    return f"✅ от {required} уровня"
+
+
 async def _render_access(ctx: ChatContext) -> None:
+    """«Доступ команд»: разделы (▶️) и команды внутри них, как в документации."""
     async with ctx.session_factory() as session:
-        lines = ["<b>Доступ команд</b>", ""]
+        lines = ["<b>Доступ команд</b>",
+                 "▶️ раздел · ✅ включено · ❌ выключено", ""]
         for key, (default, title) in COMMANDS.items():
             required = await command_min_level(session, ctx.chat_id, key)
-            if required > 5:
-                state = "❌ выключено"
-            elif required <= 0:
-                state = "✅ для всех"
-            else:
-                state = f"от {required} уровня"
-            marker = "" if required == default else " ← изменено"
-            lines.append(f"<code>{key}</code> — {state}: {title}{marker}")
+            marker = "" if required == default else " ←"
+            lines.append(f"▶️ <code>{key}</code> — {_access_state(required)}{marker}")
+            for command_key, (_level, command_title) in COMMANDS.items():
+                if COMMAND_GROUPS.get(command_key) != key:
+                    continue
+                command_required = await command_min_level(session, ctx.chat_id, command_key)
+                state = _access_state(command_required)
+                lines.append(f"    • <code>{command_key}</code> — {state}: {command_title}")
         exceptions = await session.scalar(select(func.count()).select_from(UserCommandAccess)
                                           .where(UserCommandAccess.chat_id == ctx.chat_id))
     lines.append("")

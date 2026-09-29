@@ -113,6 +113,9 @@ async def cmd_my_online(ctx: ChatContext):
 # --------------------------------------------------------------------------------------
 
 @command("созвать модеров", key_group="модер")
+@command("созвать модерации", key_group="модер")
+@command("созвать модерацию", key_group="модер")
+@command("общий сбор", key_group="модер")
 @command("позвать модеров", key_group="модер")
 @command("созвать админов", key_group="модер")
 @command("позвать админов", key_group="модер")

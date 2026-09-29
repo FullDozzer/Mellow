@@ -148,7 +148,12 @@ async def test_command_can_be_disabled_and_restored(app):
     assert await punishments(app, "ban") == []
 
     await app.dispatcher.feed_update(app.bot, group_text(82, "мой дк", telegram_id=MODERATOR_ID))
-    assert "Мой доступ команд" in await last_reply(app)
+    my_access = await last_reply(app)
+    assert "Мой доступ команд" in my_access and "❌ <code>баны</code>" in my_access
+
+    await app.dispatcher.feed_update(app.bot, group_text(821, "дк", telegram_id=OWNER_ID))
+    listing = await last_reply(app)
+    assert "▶️ <code>баны</code>" in listing and "❌ выключено" in listing
 
     await app.dispatcher.feed_update(app.bot, group_text(83, "сброс команд", telegram_id=OWNER_ID))
     await app.dispatcher.feed_update(app.bot, group_text(84, "бан @player Спам", telegram_id=MODERATOR_ID))
