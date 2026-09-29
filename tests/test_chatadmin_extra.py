@@ -459,3 +459,16 @@ async def test_topic_is_closed_inside_a_topic(app):
     app.session.calls.clear()
     await app.dispatcher.feed_update(app.bot, update)
     assert "ReopenForumTopic" in app.session.call_names
+
+
+async def test_autokick_bans_after_repeated_exits(app):
+    await app.dispatcher.feed_update(app.bot, group_text(164, "+автокик 2 60 бан",
+                                                         telegram_id=MODERATOR_ID))
+    for update_id in (165, 166):
+        member = TelegramUser(id=MEMBER_ID, is_bot=False, first_name="Player")
+        await app.dispatcher.feed_update(app.bot, Update(update_id=update_id, message=Message(
+            message_id=update_id, date=datetime.now(timezone.utc),
+            chat=Chat(id=GROUP_ID, type="supergroup", title="Mellow"),
+            from_user=member, left_chat_member=member)))
+    bans = [row for row in await punishments(app, "ban") if row.active]
+    assert len(bans) == 1 and bans[0].reason == "Автокик: частые выходы"
