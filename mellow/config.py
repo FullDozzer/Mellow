@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 import yaml
 from dotenv import load_dotenv
@@ -40,6 +39,7 @@ class Settings:
     minecraft_api_url: str | None = None
     minecraft_api_token: str | None = None
     minecraft_api_timeout: float = 8.0
+    stats_top_limit: int = 20
     log_level: str = "INFO"
 
     @property
@@ -104,5 +104,6 @@ def load_settings() -> Settings:
         minecraft_api_url=os.getenv("MINECRAFT_API_URL"),
         minecraft_api_token=os.getenv("MINECRAFT_API_TOKEN"),
         minecraft_api_timeout=float(os.getenv("MINECRAFT_API_TIMEOUT", "8")),
+        stats_top_limit=max(1, int(os.getenv("STATS_TOP_LIMIT", "20"))),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
     )

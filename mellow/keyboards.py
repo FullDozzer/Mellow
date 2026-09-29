@@ -1,15 +1,35 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 
+APPLICATION_BUTTON = "🎮 Подать заявку"
+MY_APPLICATION_BUTTON = "📋 Моя заявка"
+SUPPORT_BUTTON = "🛠 Техническая поддержка"
+SUGGESTION_BUTTON = "💡 Предложить идею"
+ADMINISTRATION_BUTTON = "👤 Обратиться к администрации"
+TICKETS_BUTTON = "💬 Мои обращения"
+INFO_BUTTON = "ℹ️ Информация"
+STATISTICS_BUTTON = "📊 Статистика"
+RIGHTS_BUTTON = "🛡 Мои права"
+
+# Every button caption a user can send as plain text, with and without the emoji.
+# A draft must not swallow these messages as answers to a form question.
+MENU_TEXTS = frozenset({
+    APPLICATION_BUTTON, MY_APPLICATION_BUTTON, SUPPORT_BUTTON, SUGGESTION_BUTTON,
+    ADMINISTRATION_BUTTON, TICKETS_BUTTON, INFO_BUTTON, STATISTICS_BUTTON, RIGHTS_BUTTON,
+    "Подать заявку", "Моя заявка", "Техническая поддержка", "Предложить идею",
+    "Обратиться к администрации", "Мои обращения", "Информация", "Статистика", "Мои права",
+})
+
+
 def main_menu(is_staff: bool = False) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text="🎮 Подать заявку"), KeyboardButton(text="📋 Моя заявка")],
-        [KeyboardButton(text="🛠 Техническая поддержка"), KeyboardButton(text="💡 Предложить идею")],
-        [KeyboardButton(text="👤 Обратиться к администрации"), KeyboardButton(text="💬 Мои обращения")],
-        [KeyboardButton(text="ℹ️ Информация")],
+        [KeyboardButton(text=APPLICATION_BUTTON), KeyboardButton(text=MY_APPLICATION_BUTTON)],
+        [KeyboardButton(text=SUPPORT_BUTTON), KeyboardButton(text=SUGGESTION_BUTTON)],
+        [KeyboardButton(text=ADMINISTRATION_BUTTON), KeyboardButton(text=TICKETS_BUTTON)],
+        [KeyboardButton(text=INFO_BUTTON), KeyboardButton(text=STATISTICS_BUTTON)],
     ]
     if is_staff:
-        rows.append([KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🛡 Мои права")])
+        rows.append([KeyboardButton(text=RIGHTS_BUTTON)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, input_field_placeholder="Выбери раздел Mellow")
 
 
