@@ -46,9 +46,12 @@ NEW_COLUMNS = {
         ("invite_links", sa.JSON(), None),
         ("bots_denied", sa.Boolean(), None),
         ("inline_notices", sa.Boolean(), None),
+        ("invite_limit", sa.Integer(), None),
+        ("antiraid_limit", sa.Integer(), None),
     ),
     "chat_members": (
         ("tag", sa.String(16), None),
+        ("invited_by", sa.Integer(), None),
     ),
 }
 

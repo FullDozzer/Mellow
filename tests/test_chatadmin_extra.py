@@ -614,3 +614,42 @@ async def test_inline_notice_toggle(app):
     app.session.calls.clear()
     await app.dispatcher.feed_update(app.bot, Update(update_id=222, callback_query=callback))
     assert any("нажал" in text for text in app.session.sent_texts)
+
+
+def invited_update(update_id: int, joiner_id: int, inviter_id: int) -> Update:
+    """Служебное сообщение о входе: from_user — тот, кто добавил, а не сам вошедший."""
+    return Update(update_id=update_id, message=Message(
+        message_id=update_id, date=datetime.now(timezone.utc),
+        chat=Chat(id=GROUP_ID, type="supergroup", title="Mellow"),
+        from_user=TelegramUser(id=inviter_id, is_bot=False, first_name="Inviter"),
+        new_chat_members=[TelegramUser(id=joiner_id, is_bot=False, first_name="Joiner")]))
+
+
+async def test_invite_limit_kicks_the_inviter(app):
+    await app.dispatcher.feed_update(app.bot, group_text(230, "инвайты 1", telegram_id=MODERATOR_ID))
+    assert "не больше 1" in await last_reply(app)
+
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, invited_update(231, 8001, MODERATOR_ID))
+    assert not any(type(call).__name__ == "BanChatMember" for call in app.session.calls)
+    await app.dispatcher.feed_update(app.bot, invited_update(232, 8002, MODERATOR_ID))
+    assert any(getattr(call, "user_id", None) == MODERATOR_ID
+               and type(call).__name__ == "BanChatMember" for call in app.session.calls)
+
+    await app.dispatcher.feed_update(app.bot, group_text(233, "инвайты 0", telegram_id=MODERATOR_ID))
+    assert "снято" in await last_reply(app)
+
+
+async def test_antiraid_bans_the_inviter_of_a_banned_member(app):
+    await app.dispatcher.feed_update(app.bot, group_text(234, "бан @player Спам", telegram_id=MODERATOR_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(235, "+антирейд", telegram_id=MODERATOR_ID))
+    assert "Антирейд" in await last_reply(app)
+
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, invited_update(236, MEMBER_ID, MODERATOR_ID))
+    bans = [row for row in await punishments(app, "ban")
+            if row.active and row.target_user_id == MODERATOR_ID]
+    assert bans and bans[0].reason == "Антирейд: приглашение забаненного"
+
+    await app.dispatcher.feed_update(app.bot, group_text(237, "-антирейд", telegram_id=MODERATOR_ID))
+    assert "выключено" in await last_reply(app)

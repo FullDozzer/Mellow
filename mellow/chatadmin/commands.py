@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from mellow.chatadmin.admin_commands import *  # noqa: F401,F403 - registers handlers
 from mellow.chatadmin.community_commands import *  # noqa: F401,F403 - registers handlers
@@ -131,7 +131,8 @@ async def cleanup_callback(callback: CallbackQuery, settings: Settings, session_
     await callback.message.edit_text(summary, reply_markup=None)
 
 
-async def _track_members(message, session_factory, *, joined: bool) -> None:
+async def _track_members(message, session_factory, *, joined: bool,
+                         invited_by: int | None = None) -> None:
     from mellow.chatadmin.admin_commands import _remember_members
 
     users = message.new_chat_members if joined else [message.left_chat_member]
@@ -139,13 +140,68 @@ async def _track_members(message, session_factory, *, joined: bool) -> None:
     if not ids:
         return
     async with session_factory() as session, session.begin():
-        await _remember_members(session, message.chat.id, ids, joined)
+        await _remember_members(session, message.chat.id, ids, joined, invited_by=invited_by)
+
+
+async def _inviter_of(message) -> int | None:
+    """Кто пригласил: в служебном сообщении это ``from_user``, если это не сам вошедший."""
+    author = message.from_user
+    if author is None or author.is_bot:
+        return None
+    joiners = {user.id for user in (message.new_chat_members or [])}
+    if author.id in joiners:
+        return None
+    return author.id
+
+
+async def _enforce_invite_policy(chat, joiners: list[int], inviter_id: int | None, config,
+                                  session_factory, bot) -> None:
+    """«Инвайты» и «Антирейд»: наказывается приглашающий, а не вошедший."""
+    from datetime import timedelta
+
+    from mellow.models import ChatMemberActivity, Punishment, utcnow
+    from mellow.moderation import apply_punishment
+
+    if inviter_id is None or not joiners:
+        return
+    if config.invite_limit:
+        cutoff = utcnow() - timedelta(minutes=1)
+        async with session_factory() as session:
+            invitations = await session.scalar(
+                select(func.count()).select_from(ChatMemberActivity)
+                .where(ChatMemberActivity.chat_id == chat.id,
+                       ChatMemberActivity.invited_by == inviter_id,
+                       ChatMemberActivity.joined_at >= cutoff))
+        if int(invitations or 0) > config.invite_limit:
+            try:
+                await bot.ban_chat_member(chat.id, inviter_id)
+                await bot.unban_chat_member(chat.id, inviter_id, only_if_banned=True)
+                await bot.send_message(chat.id, f"⚠️ <code>{inviter_id}</code> пригласил больше "
+                                                f"{config.invite_limit} человек за раз и исключён.",
+                                       parse_mode="HTML")
+            except Exception:
+                log.info("Could not kick an over-inviting member in chat %s", chat.id)
+    if config.antiraid_limit:
+        async with session_factory() as session:
+            attempts = await session.scalar(
+                select(func.count()).select_from(Punishment)
+                .where(Punishment.chat_id == chat.id,
+                       Punishment.target_user_id.in_(joiners),
+                       Punishment.type == "ban",
+                       Punishment.active.is_(True)))
+        if int(attempts or 0) >= config.antiraid_limit:
+            await apply_punishment(bot, session_factory, chat_id=chat.id, target_id=inviter_id,
+                                   action="бан", duration=None,
+                                   reason="Антирейд: приглашение забаненного", actor_id=None)
 
 
 @router.message(F.new_chat_members)
 async def on_new_members(message: Message, settings: Settings, session_factory, store: ChatSettingsStore, bot: Bot):
-    await _track_members(message, session_factory, joined=True)
+    inviter_id = await _inviter_of(message)
+    await _track_members(message, session_factory, joined=True, invited_by=inviter_id)
     config = await store.get(message.chat.id)
+    await _enforce_invite_policy(message.chat, [user.id for user in message.new_chat_members],
+                                 inviter_id, config, session_factory, bot)
     await store.remember_title(message.chat.id, message.chat.title)
     bots = [user for user in message.new_chat_members if user.is_bot]
     if bots and config.bots_denied:
@@ -301,6 +357,18 @@ async def on_membership_change(update: ChatMemberUpdated, settings: Settings, se
                                                               "restricted"}
     if was_joined and not joined:
         await _handle_leave(update.chat, member.user, session_factory, store, settings, bot)
+        return
+    if joined and not was_joined:
+        inviter = update.from_user
+        inviter_id = inviter.id if inviter is not None and inviter.id != member.user.id else None
+        if inviter_id is not None:
+            from mellow.chatadmin.admin_commands import _remember_members
+            async with session_factory() as session, session.begin():
+                await _remember_members(session, update.chat.id, [member.user.id], True,
+                                        invited_by=inviter_id)
+            config = await store.get(update.chat.id)
+            await _enforce_invite_policy(update.chat, [member.user.id], inviter_id, config,
+                                         session_factory, bot)
     async with session_factory() as session, session.begin():
         from mellow.models import ChatMemberActivity, utcnow
         row = await session.get(ChatMemberActivity, (update.chat.id, member.user.id))

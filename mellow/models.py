@@ -210,6 +210,10 @@ class ChatSettings(Base):
     bots_denied: Mapped[bool] = mapped_column(Boolean, default=False)
     # «+Инлайны» / «-Инлайны»: whether the bot comments on inline button presses.
     inline_notices: Mapped[bool] = mapped_column(Boolean, default=False)
+    # «Инвайты {число}»: how many people one member may invite at once.
+    invite_limit: Mapped[int | None] = mapped_column(Integer)
+    # «Антирейд {число}»: how many times someone may invite a banned member.
+    antiraid_limit: Mapped[int | None] = mapped_column(Integer)
     # «+Автозаявки»: approve join requests automatically.
     auto_join_requests: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -266,6 +270,8 @@ class ChatMemberActivity(Base):
     is_member: Mapped[bool] = mapped_column(Boolean, default=True)
     # «+Тг тег текст {ссылка}»: a personal note shown next to the name in bot messages.
     tag: Mapped[str | None] = mapped_column(String(16))
+    # «Инвайты»/«Антирейд»: who added the member, so the policies can be enforced.
+    invited_by: Mapped[int | None] = mapped_column(Integer)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 

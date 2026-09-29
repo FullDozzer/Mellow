@@ -290,6 +290,9 @@ async def cmd_chat_settings(ctx: ChatContext):
         + ", о выходах: " + ("включены" if config.notify_leaves else "выключены"),
         "Минимальная регистрация: " + (f"{config.minreg_days} дн." if config.minreg_days else "выключена"),
         "Автозаявки: " + ("включены" if config.auto_join_requests else "выключены"),
+        "Приглашения: " + (f"до {config.invite_limit} за раз" if config.invite_limit
+                           else "без ограничений"),
+        "Антирейд: " + (f"{config.antiraid_limit} попытк(и)" if config.antiraid_limit else "выключен"),
         "Автокик: " + (f"{config.autokick_count} выход(ов) за "
                        f"{(config.autokick_window_seconds or 0) // 86400} дн. → {config.autokick_action}"
                        if config.autokick_count else "выключен"),
@@ -764,17 +767,20 @@ async def _delete_recent(ctx: ChatContext, raw_count: str) -> None:
                     reply_markup=confirmation_keyboard(pending.token))
 
 
-async def _remember_members(session, chat_id: int, telegram_ids: list[int], joined: bool) -> None:
+async def _remember_members(session, chat_id: int, telegram_ids: list[int], joined: bool,
+                            invited_by: int | None = None) -> None:
     for telegram_id in telegram_ids:
         row = await session.get(ChatMemberActivity, (chat_id, telegram_id))
         if row is None:
             session.add(ChatMemberActivity(chat_id=chat_id, telegram_id=telegram_id,
                                            joined_at=utcnow() if joined else None,
-                                           last_message_at=None, is_member=joined))
+                                           last_message_at=None, is_member=joined,
+                                           invited_by=invited_by if joined else None))
         else:
             row.is_member = joined
             if joined:
                 row.joined_at = utcnow()
+                row.invited_by = invited_by
             row.updated_at = utcnow()
 
 
@@ -1325,6 +1331,49 @@ async def cmd_topic_lock(ctx: ChatContext):
         await ctx.reply("Не удалось открыть топик: проверь право бота «управлять темами».")
         return
     await ctx.reply("Топик открыт.")
+
+
+@command("инвайты", key_group="настройки")
+async def cmd_invites(ctx: ChatContext):
+    """«Инвайты {число}»: сколько человек можно пригласить за раз; 0 снимает лимит."""
+    if not ctx.args or not ctx.args[0].isdigit():
+        config = await ctx.store.get(ctx.chat_id)
+        state = f"{config.invite_limit} человек за раз" if config.invite_limit else "без ограничений"
+        await ctx.reply(f"Приглашения: {state}. Формат: <code>инвайты 5</code>, "
+                        "<code>инвайты 0</code> — снять лимит.")
+        return
+    limit = int(ctx.args[0])
+    await ctx.store.update(ctx.chat_id, invite_limit=limit or None)
+    if not limit:
+        await ctx.reply("Ограничение приглашений снято.")
+        return
+    await ctx.reply(f"Один участник может пригласить не больше {limit} человек за раз. "
+                    "Приглашающий сверх лимита исключается.")
+
+
+@command("антирейд", key_group="настройки")
+@command("+антирейд", key_group="настройки")
+@command("+чп", key_group="настройки")
+async def cmd_antiraid(ctx: ChatContext):
+    """«+Антирейд» / «Антирейд {число}»: наказание за приглашение забаненного."""
+    if ctx.args and ctx.args[0].isdigit():
+        limit = int(ctx.args[0])
+    else:
+        limit = 1
+    if limit <= 0:
+        await ctx.store.update(ctx.chat_id, antiraid_limit=None)
+        await ctx.reply("Антирейд выключен.")
+        return
+    await ctx.store.update(ctx.chat_id, antiraid_limit=limit)
+    await ctx.reply(f"Антирейд: после {limit} попытки пригласить забаненного приглашающий "
+                    "будет забанен.")
+
+
+@command("-антирейд", key_group="настройки")
+@command("-чп", key_group="настройки")
+async def cmd_antiraid_off(ctx: ChatContext):
+    await ctx.store.update(ctx.chat_id, antiraid_limit=None)
+    await ctx.reply("Наказание за приглашение забаненного выключено.")
 
 
 @command("+боты", key_group="настройки")

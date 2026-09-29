@@ -127,6 +127,8 @@ class ChatConfig:
     invite_links: list[str] = field(default_factory=list)
     bots_denied: bool = False
     inline_notices: bool = False
+    invite_limit: int | None = None
+    antiraid_limit: int | None = None
 
     @classmethod
     def from_row(cls, row: ChatSettings) -> "ChatConfig":
@@ -148,6 +150,7 @@ class ChatConfig:
             auto_join_requests=row.auto_join_requests,
             invite_links=list(row.invite_links or []),
             bots_denied=row.bots_denied, inline_notices=row.inline_notices,
+            invite_limit=row.invite_limit, antiraid_limit=row.antiraid_limit,
         )
 
 
