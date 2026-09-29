@@ -752,18 +752,23 @@ def is_statistics_request(text: str) -> bool:
 
 
 async def send_statistics(message: Message, settings: Settings, session_factory, *, in_group: bool) -> None:
-    """Personal progress for everybody, the whole chat picture for active staff."""
+    """The chat board plus the caller's own numbers, for everyone who asks.
+
+    Staff are shown without a personal block on purpose: they are excluded from the
+    counter, so "осталось написать" would be meaningless for them.
+    """
     if message.from_user is None or message.sender_chat is not None:
         return
     async with session_factory() as session:
         level = await staff_level(session, message.from_user.id)
-        community = await community_statistics(session, settings, limit=settings.stats_top_limit) if level > 0 else None
-        progress = None if community is not None else await member_progress(session, settings, message.from_user.id)
-    if community is not None:
-        await message.answer(render_community_statistics(community, settings), parse_mode="HTML")
-        return
-    await message.answer(render_member_progress(progress, settings), parse_mode="HTML",
-                         reply_to_message_id=message.message_id if in_group else None)
+        community = await community_statistics(session, settings, limit=settings.stats_top_limit)
+        progress = None if level > 0 else await member_progress(session, settings, message.from_user.id)
+    if progress is None or not settings.message_requirement_enabled:
+        text = render_community_statistics(community, settings)
+    else:
+        text = "\n\n".join([render_member_progress(progress, settings),
+                            render_community_statistics(community, settings)])
+    await message.answer(text, parse_mode="HTML", reply_to_message_id=message.message_id if in_group else None)
 
 
 @router.message(Command("статистика", "stats", "stat", "statistics", ignore_case=True))

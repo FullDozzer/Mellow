@@ -113,7 +113,7 @@ async def test_user_journey_through_the_dispatcher(app):
     await app.dispatcher.feed_update(app.bot, private_message(3, "🎮 Подать заявку"))
     assert "Заявка на вступление" in app.session.sent_texts[2]
 
-    # 4. Staff see the whole chat in a group chat.
+    # 4. Everyone in a group sees the whole chat; staff have no personal line.
     async with app.session_factory() as session, session.begin():
         user = User(telegram_id=900, username="helper")
         session.add(user)
@@ -129,8 +129,13 @@ async def test_user_journey_through_the_dispatcher(app):
     assert "Всего сообщений: <b>4</b>" in answer
     assert "@active — 4, осталось 6" in answer
     assert "Порог (10) выполнили: <b>0</b>" in answer
+    assert "Твоя статистика" not in answer
 
-    # 5. A member in the same group gets only their own progress.
+    # 5. A member in the same group sees the board and their own remaining count
+    #    (their own message is already counted by the middleware before the handler runs).
     await app.dispatcher.feed_update(app.bot, group_message(5, "/статистика", telegram_id=902))
-    assert "Твоя статистика" in app.session.sent_texts[4]
-    assert "Всего сообщений" not in app.session.sent_texts[4]
+    answer = app.session.sent_texts[4]
+    assert "Твоя статистика" in answer
+    assert "Осталось написать: <b>9</b>" in answer
+    assert "Всего сообщений: <b>5</b>" in answer
+    assert "ID 902 — 1, осталось 9" in answer
