@@ -31,6 +31,12 @@ class UnsupportedOutboxEvent(RuntimeError):
     pass
 
 
+def has_attachment(message) -> bool:
+    """True when the message carries media, for «Статистика вложений»."""
+    return any(getattr(message, field, None) is not None for field in (
+        "photo", "video", "animation", "document", "audio", "voice", "video_note", "sticker", "poll", "dice"))
+
+
 class PrivacySafeMessageCounter(BaseMiddleware):
     def __init__(self, settings: Settings, session_factory):
         self.settings = settings
@@ -54,7 +60,8 @@ class PrivacySafeMessageCounter(BaseMiddleware):
             if (message is not None and message.chat.type in {"group", "supergroup"}
                     and message.from_user is not None and not message.from_user.is_bot):
                 result = await increment_message_count(self.session_factory, self.settings,
-                    message.from_user.id, message.from_user.username, event.update_id)
+                    message.from_user.id, message.from_user.username, event.update_id,
+                    chat_id=message.chat.id, attachment=has_attachment(message))
                 _, _, duplicate = result
                 if duplicate:
                     return None

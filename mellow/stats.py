@@ -9,7 +9,9 @@ from the counter by design, so they are reported separately.
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -110,4 +112,55 @@ def render_community_statistics(stats: CommunityStatistics, settings: Settings, 
         lines.append(f"…и ещё участников: {stats.tracked_members - len(stats.top)}")
     lines.append("")
     lines.append("Администраторы в счётчик не попадают.")
+    return "\n".join(lines)
+
+
+DAY_KEY_FORMAT = "%Y-%m-%d"
+CHART_BLOCKS = "▁▂▃▄▅▆▇█"
+MAX_CHART_LINES = 30
+
+
+def day_key(moment: datetime | None = None) -> str:
+    """The UTC day a message belongs to (the counter itself is timezone-free)."""
+    moment = moment or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime(DAY_KEY_FORMAT)
+
+
+def parse_days(raw: str | None, *, default: int = 30, minimum: int = 1, maximum: int = 5000) -> int | None:
+    """Parse «{число дней}» from a command; ``None`` means "the argument is invalid"."""
+    if raw is None or not str(raw).strip():
+        return default
+    value = str(raw).strip().lower()
+    match = re.fullmatch(r"(\d+)\s*(?:дн\w*|д\w*|дней|дня|день)?", value)
+    if not match:
+        return None
+    days = int(match.group(1))
+    if not minimum <= days <= maximum:
+        return None
+    return days
+
+
+def render_chart(series: list[tuple[str, int]], *, height: int = 8, max_columns: int = 24,
+                 title: str = "Сообщения по дням") -> str:
+    """A compact vertical text chart: a column per day, scaled to the busiest day."""
+    if not series:
+        return f"{title}\nНет данных за этот период."
+    values = [int(count) for _, count in series]
+    labels = [day[5:] for day, _ in series]
+    if len(values) > max_columns:
+        step = -(-len(values) // max_columns)
+        values = [sum(values[index:index + step]) for index in range(0, len(values), step)]
+        labels = [labels[index] for index in range(0, len(labels), step)]
+    peak = max(values) or 1
+    lines = [f"{title}: максимум {peak}, всего {sum(values)}"]
+    for level in range(height, 0, -1):
+        threshold = peak * level / height
+        bars = "".join("█" if value >= threshold else " " for value in values)
+        lines.append(f"{round(threshold):>6} │{bars}")
+    lines.append("       └" + "─" * len(values))
+    lines.append(f"        {labels[0]} → {labels[-1]}")
+    if len(values) <= max_columns:
+        lines.append("        " + " ".join(f"{value}" for value in values))
     return "\n".join(lines)

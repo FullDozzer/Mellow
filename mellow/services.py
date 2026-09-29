@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from mellow.config import Settings
-from mellow.models import AuditLog, MessageStat, OutboxEvent, ProcessedUpdate, Staff, User, utcnow
+from mellow.models import (AuditLog, DailyMessageStat, MessageStat, OutboxEvent, ProcessedUpdate, Punishment,
+                          Staff, User, utcnow)
+from mellow.stats import day_key
 
 
 async def ensure_user(session: AsyncSession, telegram_user) -> User:
@@ -70,8 +72,13 @@ async def claim_update(session_factory, update_id: int) -> bool:
 
 
 async def increment_message_count(session_factory, settings: Settings, telegram_user_id: int,
-                                  username: str | None, update_id: int) -> tuple[int | None, bool, bool]:
-    """Atomically claim a Telegram update and increment an attributable user once."""
+                                  username: str | None, update_id: int, chat_id: int | None = None,
+                                  attachment: bool = False) -> tuple[int | None, bool, bool]:
+    """Atomically claim a Telegram update and increment an attributable user once.
+
+    The same transaction also advances the per-chat daily counters used by the chat
+    administration statistics, so a message is never counted twice or not at all.
+    """
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -82,13 +89,23 @@ async def increment_message_count(session_factory, settings: Settings, telegram_
         result = await session.execute(claim)
         if result.rowcount == 0:
             return None, False, True
+        if chat_id:
+            counted = insert(DailyMessageStat).values(chat_id=chat_id, day=day_key(), message_count=1,
+                                                      attachment_count=1 if attachment else 0)
+            counted = counted.on_conflict_do_update(
+                index_elements=["chat_id", "day"],
+                set_={"message_count": DailyMessageStat.message_count + 1,
+                      "attachment_count": DailyMessageStat.attachment_count + (1 if attachment else 0)})
+            await session.execute(counted)
         if not settings.message_requirement_enabled:
             return None, False, False
 
         now = utcnow()
         user_stmt = insert(User).values(telegram_id=telegram_user_id, username=username, created_at=now, updated_at=now)
+        # A member without a public username must not erase the one already stored:
+        # otherwise «кто админ» and the profile would show a bare id after one message.
         user_stmt = user_stmt.on_conflict_do_update(index_elements=["telegram_id"],
-            set_={"username": username, "updated_at": now}).returning(User.id)
+            set_={"username": func.coalesce(username, User.username), "updated_at": now}).returning(User.id)
         user_id = (await session.execute(user_stmt)).scalar_one()
         active_staff = await session.scalar(select(Staff.user_id).where(
             Staff.user_id == user_id, Staff.active.is_(True)).with_for_update())
@@ -137,3 +154,56 @@ def parse_duration(value: str) -> int | None:
 
 def expires_at(duration: int | None) -> datetime | None:
     return datetime.now(timezone.utc) + timedelta(seconds=duration) if duration else None
+
+
+def _row_is_active(row: Punishment) -> bool:
+    """A local copy of the expiry rule: importing mellow.moderation here would be a cycle."""
+    if not row.active:
+        return False
+    if row.expires_at is None:
+        return True
+    expires = row.expires_at
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires > datetime.now(timezone.utc)
+
+
+async def drop_warnings(session_factory, actor_id: int | None, chat_id: int | None, target_id: int,
+                        count: int | None) -> int:
+    """Deactivate the newest ``count`` warnings of a user (``None`` = all)."""
+    ids = await deactivate_punishments(session_factory, actor_id, chat_id, target_id, "warn", limit=count)
+    return len(ids)
+
+
+async def deactivate_punishments(session_factory, actor_id: int | None, chat_id: int | None,
+                                 target_id: int, ptype: str, limit: int | None = None) -> list[int]:
+    """Turn off active punishments and return their ids so they can be restored."""
+    from sqlalchemy import select as _select
+
+    async with session_factory() as session, session.begin():
+        rows = list((await session.scalars(_select(Punishment)
+                                           .where(Punishment.target_user_id == target_id,
+                                                  Punishment.type == ptype,
+                                                  Punishment.active.is_(True))
+                                           .order_by(Punishment.id))).all())
+        rows = [row for row in rows if _row_is_active(row)]
+        if limit is not None:
+            rows = rows[-limit:]
+        for row in rows:
+            row.active = False
+        ids = [row.id for row in rows]
+        if ids:
+            await audit(session, f"{ptype}_remove", actor_id, f"telegram:{target_id}",
+                        {"ids": ids, "chat_id": chat_id})
+    return ids
+
+
+async def restore_punishments(session_factory, punishment_ids: list[int]) -> None:
+    from sqlalchemy import select as _select
+
+    if not punishment_ids:
+        return
+    async with session_factory() as session, session.begin():
+        rows = await session.scalars(_select(Punishment).where(Punishment.id.in_(punishment_ids)))
+        for row in rows.all():
+            row.active = True

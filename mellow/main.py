@@ -8,6 +8,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from mellow.chatadmin.commands import router as chatadmin_router
+from mellow.chatadmin.config import ChatSettingsStore
+from mellow.chatadmin.guard import ChatGuard, RecentMessages
 from mellow.config import load_settings
 from mellow.db import create_database, create_schema
 from mellow.handlers import router
@@ -32,8 +35,16 @@ async def main():
     dispatcher["settings"] = settings
     dispatcher["session_factory"] = session_factory
     dispatcher["minecraft"] = MinecraftClient(settings.minecraft_api_url, settings.minecraft_api_token, settings.minecraft_api_timeout)
+    store = ChatSettingsStore(session_factory)
+    recent = RecentMessages()
+    dispatcher["store"] = store
+    dispatcher["recent"] = recent
     dispatcher.update.outer_middleware(PrivacySafeMessageCounter(settings, session_factory))
+    # The guard runs after the counter: it deletes filtered messages and applies the
+    # punishments the chat configured, without storing any message text.
+    dispatcher.update.outer_middleware(ChatGuard(settings, session_factory, store, recent))
     dispatcher.include_router(router)
+    dispatcher.include_router(chatadmin_router)
     outbox_task = asyncio.create_task(outbox_worker(bot, settings, session_factory), name="mellow-outbox")
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())

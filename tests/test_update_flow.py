@@ -15,10 +15,14 @@ from aiogram.methods import AnswerCallbackQuery, SendMessage
 from aiogram.types import Chat, Message, Update, User as TelegramUser
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from mellow.chatadmin.commands import router as chatadmin_router
+from mellow.chatadmin.config import ChatSettingsStore
+from mellow.chatadmin.guard import RecentMessages
 from mellow.config import Level, Question, Settings
 from mellow.handlers import router
 from mellow.middleware import PrivacySafeMessageCounter
 from mellow.models import ApplicationDraft, Base, MessageStat, Staff, User, utcnow
+from tests.conftest import attach_routers
 
 QUESTIONS = [Question("minecraft_username", "Никнейм Minecraft", 16), Question("age", "Возраст", 3)]
 
@@ -86,10 +90,13 @@ async def app():
     dispatcher["settings"] = cfg
     dispatcher["session_factory"] = session_factory
     dispatcher["minecraft"] = SimpleNamespace(add_to_whitelist=None)
+    store = ChatSettingsStore(session_factory)
+    dispatcher["store"] = store
+    dispatcher["recent"] = RecentMessages()
     dispatcher.update.outer_middleware(PrivacySafeMessageCounter(cfg, session_factory))
-    dispatcher.include_router(router)
+    attach_routers(dispatcher, router, chatadmin_router)
     yield SimpleNamespace(bot=bot, dispatcher=dispatcher, session=bot.session,
-                          session_factory=session_factory, settings=cfg)
+                          session_factory=session_factory, settings=cfg, store=store)
     await bot.session.close()
     await engine.dispose()
 

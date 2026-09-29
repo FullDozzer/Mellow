@@ -3,26 +3,29 @@ from __future__ import annotations
 import html
 import logging
 import re
-from datetime import datetime, timezone, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from mellow.chatadmin.commands import handle_chat_command
+from mellow.chatadmin.config import ChatSettingsStore
 from mellow.config import Settings
 from mellow.delivery import (application_event_key, deliver_application, deliver_service_item,
                              service_event_key)
 from mellow.keyboards import (MENU_TEXTS, application_edit_fields, application_submit,
-                              main_menu, threshold_actions, ticket_actions)
+                              main_menu, ticket_actions)
 from mellow.minecraft import MinecraftClient, MinecraftUnavailable
-from mellow.models import (Application, ApplicationDraft, MessageStat, OutboxEvent, Punishment, Staff,
+from mellow.models import (Application, ApplicationDraft, OutboxEvent, Staff,
                            Suggestion, Ticket, User, UserPrompt, WhitelistOperation, utcnow)
+from mellow.moderation import (active_warnings, apply_punishment, cap_duration, describe_period,
+                               parse_period, perform_telegram_action, punishment_summary)
 from mellow.rendering import render_application
-from mellow.services import (audit, ensure_user, hierarchy_allows, parse_duration,
-                             permitted, staff_level, expires_at)
+from mellow.services import (audit, deactivate_punishments, drop_warnings, ensure_user, hierarchy_allows,
+                             permitted, restore_punishments, staff_level)
 from mellow.stats import (community_statistics, member_progress, render_community_statistics,
                           render_member_progress)
 
@@ -585,7 +588,7 @@ async def relay_prompt(message: Message, settings: Settings, session_factory, bo
         if not prompt:
             return False
         user_id, kind = user.id, prompt.kind
-        username, telegram_id = user.username, user.telegram_id
+        telegram_id = user.telegram_id
     content = message.text.strip()
     if len(content) < 3 or len(content) > 4000:
         await message.answer("Сообщение должно содержать от 3 до 4000 символов.")
@@ -737,18 +740,25 @@ async def handle_support_admin_reply(message: Message, settings: Settings, sessi
             log.exception("Could not relay a service reply, ticket id=%s", ticket_id)
 
 
-STATISTICS_WORDS = frozenset({"статистика", "стата", "stats", "stat", "statistics"})
+STATISTICS_WORDS = frozenset({"статистика", "stats", "stat", "statistics"})
+SHORT_STATISTICS_WORDS = frozenset({"стата"})
 
 
-def is_statistics_request(text: str) -> bool:
-    """True for «статистика», «📊 Статистика», «/статистика@bot» and «stats»."""
+def is_statistics_request(text: str, *, include_short: bool = False) -> bool:
+    """True for «статистика», «📊 Статистика», «/статистика@bot» and «stats».
+
+    «Стата» is deliberately excluded in chats: there it belongs to the chat layer
+    («Статистика сообщений»), while «статистика» answers with the board and the
+    remaining messages of the caller.
+    """
     value = text.strip().casefold()
     if value in {"📊 статистика", "статистика"}:
         return True
     words = value.split(maxsplit=1)
     if not words:
         return False
-    return words[0].lstrip("/!").split("@", 1)[0] in STATISTICS_WORDS
+    word = words[0].lstrip("/!").split("@", 1)[0]
+    return word in STATISTICS_WORDS or (include_short and word in SHORT_STATISTICS_WORDS)
 
 
 async def send_statistics(message: Message, settings: Settings, session_factory, *, in_group: bool) -> None:
@@ -771,6 +781,33 @@ async def send_statistics(message: Message, settings: Settings, session_factory,
     await message.answer(text, parse_mode="HTML", reply_to_message_id=message.message_id if in_group else None)
 
 
+async def chat_config_from_factory(session_factory, chat_id: int):
+    from mellow.chatadmin.config import chat_config
+
+    async with session_factory() as session:
+        return await chat_config(session, chat_id)
+
+
+async def resolve_moderation_target(message: Message, raw: str, session_factory) -> tuple[int | None, list[str]]:
+    """Find the target of a legacy moderation command and return the leftover tokens."""
+    tokens = raw.split()
+    if message.reply_to_message is not None:
+        replied = message.reply_to_message
+        if replied.sender_chat is None and replied.from_user is not None:
+            return replied.from_user.id, tokens
+        return None, tokens
+    if not tokens:
+        return None, tokens
+    target = tokens.pop(0)
+    if target.startswith("@"):
+        async with session_factory() as session:
+            user = await session.scalar(select(User).where(User.username.ilike(target[1:])))
+        return (user.telegram_id if user else None), tokens
+    if target.isdigit():
+        return int(target), tokens
+    return None, tokens
+
+
 @router.message(Command("статистика", "stats", "stat", "statistics", ignore_case=True))
 async def statistics_command(message: Message, settings: Settings, session_factory):
     await send_statistics(message, settings, session_factory,
@@ -778,17 +815,22 @@ async def statistics_command(message: Message, settings: Settings, session_facto
 
 
 @router.message(F.text)
-async def messages(message: Message, settings: Settings, session_factory, bot: Bot, minecraft: MinecraftClient):
+async def messages(message: Message, settings: Settings, session_factory, bot: Bot, minecraft: MinecraftClient,
+                   store: ChatSettingsStore, recent: object):
     if message.chat.type in {"group", "supergroup"}:
         if message.text and not message.text.lstrip().startswith("/") and is_statistics_request(message.text):
             await send_statistics(message, settings, session_factory, in_group=True)
+            return
+        # Chat administration («варн», «мут», «+триггер», «чат стата», …) runs first: a
+        # moderation keyword must win over the ticket-reply relay.
+        if await handle_chat_command(message, settings, session_factory, store, recent, bot):
             return
         await handle_support_admin_reply(message, settings, session_factory, bot)
         await handle_moderation(message, settings, session_factory, bot)
         return
     if message.chat.type != "private" or not message.from_user:
         return
-    if not message.text.lstrip().startswith("/") and is_statistics_request(message.text):
+    if not message.text.lstrip().startswith("/") and is_statistics_request(message.text, include_short=True):
         await send_statistics(message, settings, session_factory, in_group=False)
         return
     if await process_application_answer(message, settings, session_factory):
@@ -871,6 +913,12 @@ ROLE_RE = re.compile(r"^/?(назначитьадмина|снятьадмина
 
 
 async def handle_moderation(message: Message, settings: Settings, session_factory, bot: Bot):
+    """Slash-command forms of the moderation commands.
+
+    The natural spellings («мут 30 минут @ник», «варн @ник Флуд»), prefixes and the rank
+    aliases are handled by :mod:`mellow.chatadmin`; this handler keeps the documented
+    slash variants working and shares the same storage and hierarchy rules.
+    """
     # Sender-chat messages are not attributed to a user and are not commands.
     if message.sender_chat is not None:
         return
@@ -892,111 +940,61 @@ async def handle_moderation(message: Message, settings: Settings, session_factor
     if not allowed:
         await message.reply("Недостаточно прав для этой команды.")
         return
-    tokens = raw.split()
-    target_id = None
-    if message.reply_to_message:
-        replied = message.reply_to_message
-        if replied.sender_chat is None and replied.from_user:
-            target_id = replied.from_user.id
-    else:
-        if not tokens:
-            await message.reply("Укажи пользователя: команда @username [срок] [причина], либо ответь на его сообщение.")
-            return
-        target = tokens.pop(0)
-        if target.startswith("@"):
-            async with session_factory() as session:
-                user = await session.scalar(select(User).where(User.username.ilike(target[1:])))
-                target_id = user.telegram_id if user else None
-        elif target.isdigit():
-            target_id = int(target)
-        else:
-            await message.reply("Укажи Telegram ID или @username.")
-            return
-    if not target_id:
-        await message.reply("Не удалось определить пользователя. Ответь на его сообщение или укажи ID из базы бота.")
+    target_id, tokens = await resolve_moderation_target(message, raw, session_factory)
+    if target_id is None:
+        await message.reply("Укажи пользователя: команда @username [срок] [причина], либо ответь на его сообщение.")
         return
+    if command == "предупреждения":
+        async with session_factory() as session:
+            warns = await active_warnings(session, target_id)
+        summary = "\n".join(punishment_summary(row) for row in warns) or "Активных предупреждений нет."
+        await message.reply(f"Предупреждения пользователя {target_id}:\n{summary}")
+        return
+    if command == "снятьварн":
+        removed = await drop_warnings(session_factory, actor_id, message.chat.id, target_id, 1)
+        await message.reply(f"Снято предупреждений: {removed}.")
+        return
+    if command in {"разбан", "размут"}:
+        action = "разбан" if command == "разбан" else "размут"
+        ptype = "ban" if action == "разбан" else "mute"
+        removed = await deactivate_punishments(session_factory, actor_id, message.chat.id, target_id, ptype)
+        try:
+            await perform_telegram_action(bot, message.chat.id, action, target_id)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            await restore_punishments(session_factory, removed)
+            await message.reply("Telegram не подтвердил действие. Проверь права бота и статус пользователя.")
+            return
+        await message.reply(f"Готово: {command} → {target_id}")
+        return
+
     duration = None
     reason = " ".join(tokens).strip() or None
-    if command in {"бан", "мут"} and tokens and re.fullmatch(r"\d+[смчдw]", tokens[0].lower()):
+    if command in {"бан", "мут"} and tokens and re.fullmatch(r"\d+\s*[a-zа-я]*", tokens[0].lower()):
         try:
-            duration = parse_duration(tokens[0])
+            duration = parse_period(" ".join(tokens))
+            reason = None
         except ValueError as exc:
             await message.reply(str(exc))
             return
-        reason = " ".join(tokens[1:]).strip() or None
     if command in {"бан", "мут"} and duration is None:
-        duration = min(86400, settings.levels[actor_level].max_punishment_seconds or 86400)
-    punishment_id = None
-    removed_punishment_ids: list[int] = []
-    async with session_factory() as session, session.begin():
-        allowed, actor_level = await permitted(session, settings, actor_id, permission)
-        if not allowed:
-            await message.reply("Недостаточно прав для этой команды.")
-            return
-        maximum = settings.levels[actor_level].max_punishment_seconds
-        if duration and maximum and duration > maximum:
-            await message.reply("Срок превышает лимит твоего уровня.")
-            return
+        config = await chat_config_from_factory(session_factory, message.chat.id)
+        default = config.ban_default_seconds if command == "бан" else config.mute_default_seconds
+        duration = default
+    maximum = settings.levels[actor_level].max_punishment_seconds
+    duration = cap_duration(settings, actor_level, duration)
+    async with session_factory() as session:
         target_level = await staff_level(session, target_id)
-        if not hierarchy_allows(actor_level, target_level):
-            await message.reply("Нельзя применять действие к администратору своего или более высокого уровня.")
-            return
-        if command in {"предупреждения", "снятьварн"}:
-            warns = list((await session.scalars(select(Punishment).where(Punishment.target_user_id == target_id,
-                Punishment.type == "warn", Punishment.active).order_by(Punishment.id.desc()))).all())
-            if command == "предупреждения":
-                summary = "\n".join(f"#{p.id}: {html.escape(p.reason or 'без причины')}" for p in warns) or "Активных предупреждений нет."
-                await message.reply(f"Предупреждения пользователя {target_id}:\n{summary}")
-                return
-            if not warns:
-                await message.reply("Активных предупреждений нет.")
-                return
-            warns[0].active = False
-            await audit(session, "warn_remove", actor_id, f"telegram:{target_id}", {"punishment_id": warns[0].id})
-        elif command in {"разбан", "размут"}:
-            ptype = "ban" if command == "разбан" else "mute"
-            records = list((await session.scalars(select(Punishment).where(Punishment.target_user_id == target_id,
-                Punishment.type == ptype, Punishment.active))).all())
-            removed_punishment_ids = [item.id for item in records]
-            for item in records:
-                item.active = False
-            await audit(session, f"{ptype}_remove", actor_id, f"telegram:{target_id}")
-        else:
-            ptype = {"бан": "ban", "кик": "kick", "мут": "mute", "варн": "warn"}[command]
-            punishment = Punishment(target_user_id=target_id, moderator_id=actor_id, type=ptype,
-                                    reason=reason, duration=duration, expires_at=expires_at(duration))
-            session.add(punishment)
-            await session.flush()
-            punishment_id = punishment.id
-            await audit(session, f"punishment_{ptype}", actor_id, f"telegram:{target_id}", {"reason": reason, "duration": duration})
-    try:
-        if command == "бан":
-            await bot.ban_chat_member(message.chat.id, target_id, until_date=datetime.now(timezone.utc) + timedelta(seconds=duration) if duration else None)
-        elif command == "разбан":
-            await bot.unban_chat_member(message.chat.id, target_id, only_if_banned=True)
-        elif command == "кик":
-            await bot.ban_chat_member(message.chat.id, target_id)
-            await bot.unban_chat_member(message.chat.id, target_id, only_if_banned=True)
-        elif command == "мут":
-            await bot.restrict_chat_member(message.chat.id, target_id, permissions=ChatPermissions(can_send_messages=False),
-                                           until_date=datetime.now(timezone.utc) + timedelta(seconds=duration))
-        elif command == "размут":
-            await bot.restrict_chat_member(message.chat.id, target_id, permissions=ChatPermissions(
-                can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True,
-                can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True,
-                can_send_other_messages=True, can_add_web_page_previews=True))
-    except (TelegramBadRequest, TelegramForbiddenError):
-        async with session_factory() as session, session.begin():
-            if punishment_id is not None:
-                punishment = await session.get(Punishment, punishment_id)
-                if punishment:
-                    punishment.active = False
-            if removed_punishment_ids:
-                records = list((await session.scalars(select(Punishment).where(Punishment.id.in_(removed_punishment_ids)))).all())
-                for record in records:
-                    record.active = True
-            await audit(session, "moderation_api_not_confirmed", actor_id, f"telegram:{target_id}", {"command": command})
-        log.warning("Telegram moderation action was not confirmed: command=%s", command)
+    if not hierarchy_allows(actor_level, target_level):
+        await message.reply("Нельзя применять действие к администратору своего или более высокого уровня.")
+        return
+    if maximum and duration and duration > maximum:
+        await message.reply("Срок превышает лимит твоего уровня.")
+        return
+    if command == "кик":
+        reason = " ".join(tokens).strip() or None
+    result = await apply_punishment(bot, session_factory, chat_id=message.chat.id, target_id=target_id,
+                                    action=command, duration=duration, reason=reason, actor_id=actor_id)
+    if not result.applied:
         await message.reply("Telegram не подтвердил действие. Проверь права бота и статус пользователя.")
         return
-    await message.reply(f"Готово: {command} → {target_id}" + (f" ({duration} сек.)" if duration else ""))
+    await message.reply(f"Готово: {command} → {target_id}" + (f" ({describe_period(duration)})" if duration else ""))

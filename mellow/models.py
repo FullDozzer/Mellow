@@ -98,6 +98,7 @@ class Suggestion(Base):
 class Punishment(Base):
     __tablename__ = "punishments"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int | None] = mapped_column(Integer, index=True)
     target_user_id: Mapped[int] = mapped_column(Integer, index=True)
     moderator_id: Mapped[int | None] = mapped_column(Integer)
     type: Mapped[str] = mapped_column(String(20))
@@ -159,3 +160,92 @@ class OutboxEvent(Base):
     last_error: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ChatSettings(Base):
+    """Per-chat administration settings («Настройка чата»)."""
+
+    __tablename__ = "chat_settings"
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str | None] = mapped_column(String(128))
+    welcome_text: Mapped[str | None] = mapped_column(Text)
+    rules_text: Mapped[str | None] = mapped_column(Text)
+    warning_limit: Mapped[int] = mapped_column(Integer, default=3)
+    warning_ban_seconds: Mapped[int] = mapped_column(Integer, default=604800)
+    warning_period_seconds: Mapped[int | None] = mapped_column(Integer)
+    mute_default_seconds: Mapped[int] = mapped_column(Integer, default=604800)
+    ban_default_seconds: Mapped[int | None] = mapped_column(Integer)
+    links_denied: Mapped[bool] = mapped_column(Boolean, default=False)
+    denied_link_types: Mapped[list] = mapped_column(JSON, default=list)
+    allowed_links: Mapped[list] = mapped_column(JSON, default=list)
+    caps_percent: Mapped[int | None] = mapped_column(Integer)
+    caps_min_length: Mapped[int] = mapped_column(Integer, default=5)
+    sticker_limit: Mapped[int | None] = mapped_column(Integer)
+    voice_denied: Mapped[bool] = mapped_column(Boolean, default=False)
+    guest_bots_denied: Mapped[bool] = mapped_column(Boolean, default=False)
+    profanity_filter: Mapped[bool] = mapped_column(Boolean, default=False)
+    show_charts: Mapped[bool] = mapped_column(Boolean, default=True)
+    show_mod_tags: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class Trigger(Base):
+    """Automatic reaction to an event («Триггеры и автоматические наказания»).
+
+    ``actions`` is a list of ``{"command": ..., "duration": ..., "reason": ...}`` rows
+    parsed from the moderator's message; nothing from user messages is ever stored.
+    """
+
+    __tablename__ = "triggers"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(Integer, index=True)
+    event: Mapped[str] = mapped_column(String(40), index=True)
+    min_level: Mapped[int] = mapped_column(Integer, default=0)
+    actions: Mapped[list] = mapped_column(JSON, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    __table_args__ = (UniqueConstraint("chat_id", "event", name="uq_trigger_chat_event"),)
+
+
+class CommandAccess(Base):
+    """Per-chat override of the minimum rank required for a command («Доступ команд»)."""
+
+    __tablename__ = "command_access"
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    command: Mapped[str] = mapped_column(String(40), primary_key=True)
+    min_level: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class GridChat(Base):
+    """A chat that belongs to a moderator grid («Настройка сетки чатов»)."""
+
+    __tablename__ = "grid_chats"
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    grid_name: Mapped[str] = mapped_column(String(64), index=True)
+    mod_level: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ChatMemberActivity(Base):
+    """Join/leave tracking used by «Кик новичков», «Кик неактив» and «Кик удалённых»."""
+
+    __tablename__ = "chat_members"
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_member: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class DailyMessageStat(Base):
+    """Messages and attachments per chat per day, for «Чат стата {число дней}»."""
+
+    __tablename__ = "daily_message_stats"
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    attachment_count: Mapped[int] = mapped_column(Integer, default=0)
