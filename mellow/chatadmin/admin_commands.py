@@ -415,7 +415,7 @@ async def cmd_command_access(ctx: ChatContext):
         await _render_access(ctx)
         return
     if lowered[0] == "установить" and len(args) > 1:
-        await _install_grid(ctx, " ".join(args[1:]).strip())
+        await _install_grid(ctx, _grid_name_from(args[1:]))
         return
     if lowered[0] in {"мдк", "мой доступ команд"}:
         await _set_access_for_key(ctx, "мой дк", args[1:])
@@ -895,7 +895,7 @@ async def cmd_grid(ctx: ChatContext):
         name = await grid_of_chat(session, ctx.chat_id)
     if name is None:
         if args and args[0].lower() in {"установить", "создать"}:
-            await _install_grid(ctx, " ".join(args[1:]))
+            await _install_grid(ctx, _grid_name_from(args[1:]))
             return
         await ctx.reply("Этот чат не входит в сетку. Установить: <code>дк установить сетку Название</code>.")
         return
@@ -932,6 +932,13 @@ async def cmd_grid(ctx: ChatContext):
         return
     await ctx.reply("Команды сетки: <code>сетка</code>, <code>сетка !!модер @ник</code>, "
                     "<code>сетка разжаловать @ник</code>, <code>сетка выйти</code>.")
+
+
+def _grid_name_from(words: list[str]) -> str:
+    """«Дк установить сетку Название» и «дк установка сетки Название» — имя без служебных слов."""
+    leftovers = [word for word in words
+                 if word.lower() not in {"сетку", "сетка", "сеть", "название"}]
+    return " ".join(leftovers).strip()
 
 
 async def _grid_telegram_admins(ctx: ChatContext, grid_name: str, args: list[str]) -> None:
@@ -1063,12 +1070,18 @@ async def cmd_my_stats(ctx: ChatContext):
         await ctx.reply(await chat_stats.user_statistics(session, ctx.settings, ctx.actor_id, ctx.chat_id))
 
 
-@command("профиль", key_group="статистика", public=True)
+@command("профиль", key_group="анкета", public=True)
+@command("моя анкета", key_group="анкета", public=True)
 async def cmd_profile(ctx: ChatContext):
+    from mellow.chatadmin.profile_commands import form_text
+
     reference, _ = extract_target(ctx.args)
     target_id = await resolve_user_id(ctx.session_factory, reference, ctx.reply_target) or ctx.actor_id
     async with ctx.session_factory() as session:
-        await ctx.reply(await chat_stats.user_statistics(session, ctx.settings, target_id, ctx.chat_id))
+        card = await chat_stats.user_statistics(session, ctx.settings, target_id, ctx.chat_id)
+        form = await form_text(session, ctx.chat_id, target_id, viewer_id=ctx.actor_id,
+                               with_header=False)
+    await ctx.reply(card + "\n\n" + form)
 
 
 # --------------------------------------------------------------------------------------
@@ -1312,6 +1325,79 @@ async def cmd_topic_lock(ctx: ChatContext):
         await ctx.reply("Не удалось открыть топик: проверь право бота «управлять темами».")
         return
     await ctx.reply("Топик открыт.")
+
+
+@command("+боты", key_group="настройки")
+@command("-боты", key_group="настройки")
+async def cmd_bots(ctx: ChatContext):
+    denied = ctx.command.startswith("-")
+    await ctx.store.update(ctx.chat_id, bots_denied=denied)
+    await ctx.reply("Ботов больше нельзя приглашать в чат: добавленный бот будет исключён." if denied
+                    else "Ботов снова можно приглашать в чат.")
+
+
+@command("+инлайны", key_group="настройки")
+@command("-инлайны", key_group="настройки")
+async def cmd_inline_notices(ctx: ChatContext):
+    enabled = ctx.command.startswith("+")
+    await ctx.store.update(ctx.chat_id, inline_notices=enabled)
+    await ctx.reply("Оповещения о нажатиях кнопок включены." if enabled
+                    else "Оповещения о нажатиях кнопок выключены.")
+
+
+@command("чат ид", key_group="настройки")
+@command("код чата", key_group="настройки")
+@command("код беседы", key_group="настройки")
+async def cmd_chat_id(ctx: ChatContext):
+    if ctx.command == "чат ид":
+        await ctx.reply(f"Telegram ID чата: <code>{ctx.chat_id}</code>")
+        return
+    await ctx.reply(f"Код чата: <code>{ctx.chat_id}</code>. Он указывается в "
+                    "<code>импорт команд из {код чата}</code> и в командах сетки.")
+
+
+@command("обновить чат", key_group="настройки")
+async def cmd_refresh_chat(ctx: ChatContext):
+    try:
+        chat = await ctx.bot.get_chat(ctx.chat_id)
+    except Exception:
+        await ctx.reply("Не удалось обновить информацию о чате: проверь права бота.")
+        return
+    await ctx.store.remember_title(ctx.chat_id, getattr(chat, "title", None))
+    members = getattr(chat, "members_count", None)
+    text = f"Чат обновлён: <b>{html.escape(getattr(chat, 'title', '') or '')}</b>"
+    if members:
+        text += f"\nУчастников: {members}"
+    await ctx.reply(text)
+
+
+@command("перейти к смс", key_group="настройки")
+async def cmd_message_link(ctx: ChatContext):
+    if not ctx.args or not ctx.args[0].isdigit():
+        await ctx.reply("Формат: <code>перейти к смс 12345</code>.")
+        return
+    await ctx.reply(f"<a href=\"{_message_link(ctx.chat_id, int(ctx.args[0]))}\">Перейти к "
+                    f"сообщению {ctx.args[0]}</a>")
+
+
+@command("ветка", key_group="настройки")
+async def cmd_thread(ctx: ChatContext):
+    if ctx.reply_target is None:
+        await ctx.reply("Ответь командой на сообщение, ветку которого нужно открыть.")
+        return
+    message_id = ctx.reply_target.message_id
+    await ctx.reply(f"<a href=\"{_message_link(ctx.chat_id, message_id)}\">Ветка сообщения "
+                    f"{message_id}</a>\nTelegram показывает все ответы под этим сообщением.")
+
+
+def _message_link(chat_id: int, message_id: int) -> str:
+    """Прямая ссылка на сообщение: работает и для приватных супергрупп."""
+    short = str(chat_id)
+    if short.startswith("-100"):
+        short = short[4:]
+    else:
+        short = short.lstrip("-")
+    return f"https://t.me/c/{short}/{message_id}"
 
 
 @command("+каналы", key_group="настройки")
@@ -1595,13 +1681,6 @@ async def cmd_kick_deleted_accounts(ctx: ChatContext):
 # --------------------------------------------------------------------------------------
 # Анкета пользователя
 # --------------------------------------------------------------------------------------
-
-@command("анкета", key_group="статистика", public=True)
-@command("моя анкета", key_group="статистика", public=True)
-async def cmd_profile_form(ctx: ChatContext):
-    """«Анкета пользователя»: в Mellow это карточка профиля с данными анкеты и активностью."""
-    await cmd_profile(ctx)
-
 
 # --------------------------------------------------------------------------------------
 # Сетка: отставка

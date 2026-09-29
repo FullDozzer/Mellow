@@ -20,7 +20,8 @@ branch_labels = None
 depends_on = None
 
 NEW_TABLES = {"chat_settings", "triggers", "command_access", "grid_chats", "chat_members",
-              "daily_message_stats", "creator_wills", "user_command_access", "chat_leaves"}
+              "daily_message_stats", "creator_wills", "user_command_access", "chat_leaves",
+              "user_profiles"}
 
 # Columns added to tables of the previous revision, with the index to create for them.
 NEW_COLUMNS = {
@@ -43,6 +44,8 @@ NEW_COLUMNS = {
         ("autokick_action", sa.String(10), None),
         ("auto_join_requests", sa.Boolean(), None),
         ("invite_links", sa.JSON(), None),
+        ("bots_denied", sa.Boolean(), None),
+        ("inline_notices", sa.Boolean(), None),
     ),
     "chat_members": (
         ("tag", sa.String(16), None),

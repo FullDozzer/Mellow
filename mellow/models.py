@@ -206,6 +206,10 @@ class ChatSettings(Base):
     autokick_action: Mapped[str | None] = mapped_column(String(10))
     # «+Чат ссылка»: links the bot created for this chat, so that «сброс ссылок» can revoke them.
     invite_links: Mapped[list] = mapped_column(JSON, default=list)
+    # «+Боты» / «-Боты»: whether bots may be invited into the chat.
+    bots_denied: Mapped[bool] = mapped_column(Boolean, default=False)
+    # «+Инлайны» / «-Инлайны»: whether the bot comments on inline button presses.
+    inline_notices: Mapped[bool] = mapped_column(Boolean, default=False)
     # «+Автозаявки»: approve join requests automatically.
     auto_join_requests: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -282,6 +286,26 @@ class CreatorWill(Base):
     telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     heir_telegram_id: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class UserProfile(Base):
+    """«Анкета пользователя»: карточка участника внутри чата."""
+
+    __tablename__ = "user_profiles"
+    chat_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # «+Ник», «+Звание»: в документации Ириса они свои для каждого чата.
+    nickname: Mapped[str | None] = mapped_column(String(30))
+    title: Mapped[str | None] = mapped_column(String(30))
+    motto: Mapped[str | None] = mapped_column(String(100))
+    about: Mapped[str | None] = mapped_column(Text)
+    city: Mapped[str | None] = mapped_column(String(60))
+    gender: Mapped[str | None] = mapped_column(String(10))
+    birthday: Mapped[str | None] = mapped_column(String(10))
+    birthday_visibility: Mapped[str | None] = mapped_column(String(10))
+    citizenship: Mapped[bool] = mapped_column(Boolean, default=False)
+    form_visible: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 

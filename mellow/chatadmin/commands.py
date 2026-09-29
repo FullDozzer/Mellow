@@ -23,6 +23,8 @@ from mellow.chatadmin.community_commands import *  # noqa: F401,F403 - registers
 from mellow.chatadmin.config import ChatSettingsStore, may_use
 from mellow.chatadmin.context import GROUP_TYPES, TABLE, ChatContext, strip_prefix
 from mellow.chatadmin.moderation_commands import *  # noqa: F401,F403 - registers handlers
+from mellow.chatadmin.grid_commands import *  # noqa: F401,F403 - registers handlers
+from mellow.chatadmin.profile_commands import *  # noqa: F401,F403 - registers handlers
 from mellow.config import Settings
 from mellow.services import staff_level
 
@@ -145,6 +147,15 @@ async def on_new_members(message: Message, settings: Settings, session_factory, 
     await _track_members(message, session_factory, joined=True)
     config = await store.get(message.chat.id)
     await store.remember_title(message.chat.id, message.chat.title)
+    bots = [user for user in message.new_chat_members if user.is_bot]
+    if bots and config.bots_denied:
+        for bot_user in bots:
+            try:
+                await bot.ban_chat_member(message.chat.id, bot_user.id)
+            except Exception:
+                log.info("Could not remove an invited bot from chat %s", message.chat.id)
+        if not [user for user in message.new_chat_members if not user.is_bot]:
+            return
     humans = [user for user in message.new_chat_members if not user.is_bot]
     if config.minreg_days:
         humans = await _apply_minreg(message.chat, humans, config, session_factory, bot)
@@ -318,3 +329,19 @@ async def on_join_request(update, settings: Settings, session_factory, store: Ch
     from mellow.chatadmin.admin_commands import _remember_members
     async with session_factory() as session, session.begin():
         await _remember_members(session, update.chat.id, [update.from_user.id], True)
+
+
+@router.callback_query()
+async def inline_notice(callback: CallbackQuery, store: ChatSettingsStore, bot: Bot):
+    """«+Инлайны»: бот пишет в чат, кто нажал кнопку (в групповых чатах)."""
+    if callback.message is None or callback.message.chat.type not in GROUP_TYPES:
+        return
+    config = await store.get(callback.message.chat.id)
+    if not config.inline_notices:
+        return
+    if callback.data and callback.data.startswith(("cleanup:", "summon:")):
+        # Служебные кнопки модерации уже отвечают сами — не дублируем их уведомлением.
+        return
+    name = html.escape(callback.from_user.full_name)
+    await bot.send_message(callback.message.chat.id, f"🔘 {name} нажал(а) кнопку",
+                           parse_mode="HTML")

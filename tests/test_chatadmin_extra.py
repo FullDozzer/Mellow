@@ -333,11 +333,73 @@ async def test_join_requests_can_be_approved_automatically(app):
 # --------------------------------------------------------------------------------------
 
 async def test_profile_is_available_as_a_form(app):
-    await app.dispatcher.feed_update(app.bot, group_text(121, "анкета @player", telegram_id=MODERATOR_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(121, "профиль @player", telegram_id=MODERATOR_ID))
     reply = await last_reply(app)
-    assert "Профиль" in reply and "Сообщений в счёте" in reply
+    assert "Профиль" in reply and "Сообщений в счёте" in reply and "<b>Анкета</b>" in reply
 
     await app.dispatcher.feed_update(app.bot, group_text(122, "моя анкета", telegram_id=MEMBER_ID))
+    assert "Анкета" in await last_reply(app)
+
+
+async def test_form_fields_and_visibility(app):
+    await app.dispatcher.feed_update(app.bot, group_text(170, "+ник Меллоу", telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(171, "+звание Строитель", telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(172, "+девиз Штоп", telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(173, "мой пол м", telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(174, "мой город Казань", telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(175, "мой др 01.01.2000 месяц",
+                                                         telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(176, "+гражданство", telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(177, "о себе\nИграю с 2019 года",
+                                                         telegram_id=MEMBER_ID))
+
+    await app.dispatcher.feed_update(app.bot, group_text(178, "моя анкета", telegram_id=MEMBER_ID))
+    reply = await last_reply(app)
+    for expected in ("Меллоу", "Строитель", "Штоп", "м", "Казань", "01.01.2000", "житель",
+                     "Играю с 2019 года"):
+        assert expected in reply, expected
+
+    await app.dispatcher.feed_update(app.bot, group_text(179, "девиз @player", telegram_id=MODERATOR_ID))
+    assert "Штоп" in await last_reply(app)
+    await app.dispatcher.feed_update(app.bot, group_text(180, "девиз", telegram_id=MODERATOR_ID))
+    assert "не задан" in await last_reply(app)  # «девиз» без ссылки — про себя
+    await app.dispatcher.feed_update(app.bot, group_text(1801, "все граждане", telegram_id=MODERATOR_ID))
+    assert "Граждане чата" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(181, "-анкета", telegram_id=MEMBER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(182, "анкета @player", telegram_id=MODERATOR_ID))
+    assert "скрыл" in await last_reply(app)
+    await app.dispatcher.feed_update(app.bot, group_text(183, "моя анкета", telegram_id=MEMBER_ID))
+    assert "Казань" in await last_reply(app)
+
+
+async def test_form_staff_fields_and_clearing(app):
+    await app.dispatcher.feed_update(app.bot, group_text(184, "назначить ник Олд @player",
+                                                         telegram_id=OWNER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(185, "назначить звание Модератор @player",
+                                                         telegram_id=OWNER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(186, "назначить описание @player\nЛюблю горы",
+                                                         telegram_id=OWNER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(187, "ник", telegram_id=MEMBER_ID))
+    assert "Олд" in await last_reply(app)
+    await app.dispatcher.feed_update(app.bot, group_text(188, "описание @player", telegram_id=MEMBER_ID))
+    assert "Люблю горы" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(189, "удалить ник @player",
+                                                         telegram_id=OWNER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(190, "ник", telegram_id=MEMBER_ID))
+    assert "не задан" in await last_reply(app)
+
+    before = len(app.session.sent_texts)
+    await app.dispatcher.feed_update(app.bot, group_text(191, "назначить ник Кто-то здесь",
+                                                         telegram_id=MEMBER_ID))
+    assert len(app.session.sent_texts) == before  # обычному участнику раздел «профиль» закрыт
+
+
+async def test_who_am_i_and_who_are_you(app):
+    await app.dispatcher.feed_update(app.bot, group_text(192, "кто я", telegram_id=MEMBER_ID))
+    assert "Анкета" in await last_reply(app)
+    await app.dispatcher.feed_update(app.bot, group_text(193, "кто ты @mod", telegram_id=MEMBER_ID))
     assert "Профиль" in await last_reply(app)
 
 
@@ -472,3 +534,83 @@ async def test_autokick_bans_after_repeated_exits(app):
             from_user=member, left_chat_member=member)))
     bans = [row for row in await punishments(app, "ban") if row.active]
     assert len(bans) == 1 and bans[0].reason == "Автокик: частые выходы"
+
+
+async def test_grid_global_roles_bans_and_access(app):
+    await app.dispatcher.feed_update(app.bot, group_text(200, "дк установить сетку Тест",
+                                                         telegram_id=OWNER_ID))
+    await app.dispatcher.feed_update(app.bot, group_text(201, "+глмодер @mod", telegram_id=OWNER_ID))
+    assert "младший модератор" in (await last_reply(app)).lower()
+
+    await app.dispatcher.feed_update(app.bot, group_text(202, "сетка модеры", telegram_id=OWNER_ID))
+    assert "Модерация сетки" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(203, "сетка дк варны 2", telegram_id=OWNER_ID))
+    assert "от 2 уровня" in await last_reply(app)
+    async with app.session_factory() as session:
+        from sqlalchemy import select as sql_select
+
+        from mellow.models import CommandAccess
+        row = await session.scalar(sql_select(CommandAccess)
+                                   .where(CommandAccess.chat_id == GROUP_ID,
+                                          CommandAccess.command == "варны"))
+    assert row is not None and row.min_level == 2
+
+    await app.dispatcher.feed_update(app.bot, group_text(204, "глобан @player Спам", telegram_id=OWNER_ID))
+    assert "забанено в 1 чатах" in await last_reply(app)
+    await app.dispatcher.feed_update(app.bot, group_text(205, "сетка баны", telegram_id=OWNER_ID))
+    assert "Баны сетки" in await last_reply(app)
+    await app.dispatcher.feed_update(app.bot, group_text(206, "глоразбан @player", telegram_id=OWNER_ID))
+    assert "Глобан снят" in await last_reply(app)
+    assert [row for row in await punishments(app, "ban") if row.active] == []
+
+    await app.dispatcher.feed_update(app.bot, group_text(207, "сетка кик @player", telegram_id=OWNER_ID))
+    assert "Исключён из 1 чатов" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(208, "сетка передать создателя @mod",
+                                                         telegram_id=OWNER_ID))
+    assert "переданы" in await last_reply(app)
+    assert await staff_level_of(app, MODERATOR_ID) == 5
+    assert await staff_level_of(app, OWNER_ID) == 4
+
+
+async def test_chat_extras_and_bots(app):
+    await app.dispatcher.feed_update(app.bot, group_text(210, "чат ид", telegram_id=MODERATOR_ID))
+    assert str(GROUP_ID) in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(211, "код чата", telegram_id=MODERATOR_ID))
+    assert str(GROUP_ID) in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(212, "обновить чат", telegram_id=MODERATOR_ID))
+    assert "Чат обновлён" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(213, "перейти к смс 12345",
+                                                         telegram_id=MODERATOR_ID))
+    assert "https://t.me/c/1/12345" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(214, "ветка", telegram_id=MODERATOR_ID))
+    assert "работает" not in await last_reply(app) or "Ответь" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(215, "-боты", telegram_id=MODERATOR_ID))
+    bot_user = TelegramUser(id=5001, is_bot=True, first_name="Helper")
+    update = Update(update_id=216, message=Message(
+        message_id=216, date=datetime.now(timezone.utc),
+        chat=Chat(id=GROUP_ID, type="supergroup", title="Mellow"),
+        from_user=TelegramUser(id=MODERATOR_ID, is_bot=False, first_name="Moderator"),
+        new_chat_members=[bot_user]))
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, update)
+    assert "BanChatMember" in app.session.call_names
+
+
+async def test_inline_notice_toggle(app):
+    await app.dispatcher.feed_update(app.bot, group_text(220, "+инлайны", telegram_id=MODERATOR_ID))
+    callback = CallbackQuery(id="cb-notice", chat_instance="1", data="demo:press",
+                             from_user=TelegramUser(id=MEMBER_ID, is_bot=False, first_name="Player"),
+                             message=Message(message_id=221, date=datetime.now(timezone.utc),
+                                             chat=Chat(id=GROUP_ID, type="supergroup", title="Mellow"),
+                                             from_user=TelegramUser(id=42, is_bot=True, first_name="Mellow"),
+                                             text="Меню"))
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, Update(update_id=222, callback_query=callback))
+    assert any("нажал" in text for text in app.session.sent_texts)
