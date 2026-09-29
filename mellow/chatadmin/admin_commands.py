@@ -20,7 +20,7 @@ from mellow.chatadmin.cleanup import (TELEGRAM_DELETE_LIMIT, CleanupPlan, delete
 from mellow.chatadmin.config import (COMMANDS, DISABLED_LEVEL, PUBLIC_LEVEL, command_key,
                                      command_min_level, set_command_access, set_personal_access)
 from mellow.chatadmin.context import TABLE, ChatContext, command, extract_target, resolve_user_id
-from mellow.chatadmin.grid import grid_of_chat, grid_rows, remove_from_grid, set_grid
+from mellow.chatadmin.grid import (grid_chat_ids, grid_of_chat, grid_rows, remove_from_grid, set_grid)
 from mellow.chatadmin.triggers import (EVENTS, MAX_ACTIONS, delete_trigger, list_triggers, parse_actions,
                                        render_trigger, resolve_event, set_trigger)
 from mellow.models import (AuditLog, ChatMemberActivity, CommandAccess, User, UserCommandAccess,
@@ -919,6 +919,9 @@ async def cmd_grid(ctx: ChatContext):
             return
         await _grid_set_level(ctx, name, target_id, min(5, max(1, level)))
         return
+    if action in {"тг", "телеграм"} or (action.startswith(("+тг", "-тг"))):
+        await _grid_telegram_admins(ctx, name, args)
+        return
     if action in {"разжаловать", "снять"}:
         reference, _ = extract_target(args[1:])
         target_id = await resolve_user_id(ctx.session_factory, reference, ctx.reply_target)
@@ -929,6 +932,60 @@ async def cmd_grid(ctx: ChatContext):
         return
     await ctx.reply("Команды сетки: <code>сетка</code>, <code>сетка !!модер @ник</code>, "
                     "<code>сетка разжаловать @ник</code>, <code>сетка выйти</code>.")
+
+
+async def _grid_telegram_admins(ctx: ChatContext, grid_name: str, args: list[str]) -> None:
+    """«Сетка тг админ {должность} {ссылка}», «Сетка -тг админ {ссылка}», «Сетка тг права {ссылка}».
+
+    Права выдаются в каждом чате сетки; где бот не администратор, изменение пропускается.
+    """
+    service = {"тг", "админ", "телеграм", "+тг", "-тг"}
+    show_rights = any(word.lower() == "права" for word in args)
+    remaining = [word for word in args if word.lower() not in service and word.lower() != "права"]
+    reference, title_words = extract_target(remaining)
+    target_id = await resolve_user_id(ctx.session_factory, reference, ctx.reply_target)
+    if target_id is None:
+        await ctx.reply("Формат: <code>сетка тг админ Модератор @ник</code>, "
+                        "<code>сетка -тг админ @ник</code> или <code>сетка тг права @ник</code>.")
+        return
+    if show_rights:
+        await _reply_telegram_rights(ctx, target_id)
+        return
+    promote = not any("-тг" in word.lower() for word in args)
+    async with ctx.session_factory() as session:
+        chat_ids = await grid_chat_ids(session, grid_name)
+    done = failed = 0
+    title = " ".join(title_words).strip()[:16]
+    for chat_id in chat_ids:
+        try:
+            await ctx.bot.promote_chat_member(
+                chat_id, target_id,
+                can_manage_chat=promote, can_delete_messages=promote, can_restrict_members=promote,
+                can_invite_users=promote, can_pin_messages=promote)
+            if promote and title:
+                await ctx.bot.set_chat_administrator_custom_title(chat_id, target_id, title)
+            done += 1
+        except Exception:
+            failed += 1
+    verb = "назначен" if promote else "снят"
+    await ctx.reply(f"Сетка «{html.escape(grid_name)}»: <code>{target_id}</code> {verb} "
+                    f"в {done} чатах" + (f", не удалось в {failed}" if failed else "") + ".")
+
+
+async def _reply_telegram_rights(ctx: ChatContext, target_id: int) -> None:
+    try:
+        member = await ctx.bot.get_chat_member(ctx.chat_id, target_id)
+    except Exception:
+        await ctx.reply("Не удалось получить права участника.")
+        return
+    rights = [name for name in ("can_manage_chat", "can_delete_messages", "can_restrict_members",
+                                "can_pin_messages", "can_invite_users", "can_promote_members")
+              if getattr(member, name, False)]
+    status = getattr(member, "status", "unknown")
+    text = f"<b>Telegram-права</b>\nСтатус: <code>{html.escape(str(status))}</code>"
+    text += ("\n" + ", ".join(f"<code>{name}</code>" for name in rights)) if rights else \
+        "\nАдминистративных прав нет."
+    await ctx.reply(text)
 
 
 async def _grid_set_level(ctx: ChatContext, grid_name: str, target_id: int, level: int | None) -> None:
@@ -1182,23 +1239,7 @@ async def cmd_telegram_rights(ctx: ChatContext):
     if target_id is None:
         await ctx.reply("Формат: <code>тг права @ник</code>.")
         return
-    try:
-        member = await ctx.bot.get_chat_member(ctx.chat_id, target_id)
-    except Exception:
-        await ctx.reply("Не удалось получить права участника.")
-        return
-    rights = []
-    for name in ("can_manage_chat", "can_delete_messages", "can_restrict_members",
-                 "can_pin_messages", "can_invite_users", "can_promote_members"):
-        if getattr(member, name, False):
-            rights.append(name)
-    status = getattr(member, "status", "unknown")
-    text = f"<b>Telegram-права</b>\nСтатус: <code>{html.escape(str(status))}</code>"
-    if rights:
-        text += "\n" + ", ".join(f"<code>{html.escape(name)}</code>" for name in rights)
-    else:
-        text += "\nАдминистративных прав нет."
-    await ctx.reply(text)
+    await _reply_telegram_rights(ctx, target_id)
 
 
 @command("тг разрешения чата", key_group="настройки")
@@ -1247,6 +1288,30 @@ async def cmd_close_chat(ctx: ChatContext):
         return
     await ctx.store.update(ctx.chat_id, closed_permissions=None)
     await ctx.reply("Чат открыт: участники снова могут писать.")
+
+
+@command("+топик", key_group="настройки")
+@command("-топик", key_group="настройки")
+async def cmd_topic_lock(ctx: ChatContext):
+    """«+Топик» / «-Топик»: писать в теме могут только администраторы."""
+    thread_id = getattr(ctx.message, "message_thread_id", None)
+    if not thread_id:
+        await ctx.reply("Команда работает в топике: напиши её в нужной теме.")
+        return
+    if ctx.command.startswith("+"):
+        try:
+            await ctx.bot.close_forum_topic(ctx.chat_id, thread_id)
+        except Exception:
+            await ctx.reply("Не удалось закрыть топик: проверь право бота «управлять темами».")
+            return
+        await ctx.reply("Топик закрыт: писать могут только администраторы.")
+        return
+    try:
+        await ctx.bot.reopen_forum_topic(ctx.chat_id, thread_id)
+    except Exception:
+        await ctx.reply("Не удалось открыть топик: проверь право бота «управлять темами».")
+        return
+    await ctx.reply("Топик открыт.")
 
 
 @command("+каналы", key_group="настройки")

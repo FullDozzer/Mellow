@@ -14,7 +14,7 @@ from sqlalchemy import select
 from mellow.models import ChatMemberActivity, CreatorWill, Staff, User, utcnow
 from tests.test_chatadmin import (GROUP_ID, MEMBER_ID, MODERATOR_ID, OWNER_ID, group_text,
                                   last_reply, punishments)
-from tests.test_chatadmin import app as _chatadmin_app
+from tests.test_chatadmin import AdminSession, app as _chatadmin_app
 
 # pytest discovers fixtures by the name they are bound to in the module.
 app = _chatadmin_app
@@ -375,3 +375,87 @@ async def test_welcome_variables_are_substituted(app):
 
     await app.dispatcher.feed_update(app.bot, group_text(148, "приветствие", telegram_id=MEMBER_ID))
     assert "Привет, {имя}!" in await last_reply(app)
+
+
+async def test_deleted_accounts_are_listed_and_filtered(app):
+    async with app.session_factory() as session, session.begin():
+        session.add(ChatMemberActivity(chat_id=GROUP_ID, telegram_id=AdminSession.DELETED_ACCOUNT_ID,
+                                       joined_at=utcnow(), last_message_at=utcnow(), is_member=True))
+    await app.dispatcher.feed_update(app.bot, group_text(150, "кто удалён", telegram_id=MODERATOR_ID))
+    assert str(AdminSession.DELETED_ACCOUNT_ID) in await last_reply(app)
+
+
+async def test_channel_messages_are_blocked_when_denied(app):
+    from aiogram.types import Chat as TgChat
+
+    await app.dispatcher.feed_update(app.bot, group_text(151, "-каналы", telegram_id=MODERATOR_ID))
+    update = Update(update_id=152, message=Message(
+        message_id=152, date=datetime.now(timezone.utc),
+        chat=Chat(id=GROUP_ID, type="supergroup", title="Mellow"),
+        sender_chat=TgChat(id=-1009, type="channel", title="Spam"),
+        from_user=TelegramUser(id=0, is_bot=False, first_name="Spam"),
+        text="реклама"))
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, update)
+    assert 152 in app.session.deleted_messages
+    assert "BanChatSenderChat" in app.session.call_names
+
+
+async def test_minreg_and_autokick(app):
+    await app.dispatcher.feed_update(app.bot, group_text(153, "+минрег 1", telegram_id=MODERATOR_ID))
+    assert (await config_of(app)).minreg_days == 1
+
+    async with app.session_factory() as session, session.begin():
+        session.add(User(telegram_id=1001, username="fresh", created_at=utcnow()))
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, join_update(154, 1001, "Fresh"))
+    assert "BanChatMember" in app.session.call_names  # свежий аккаунт исключён
+
+    await app.dispatcher.feed_update(app.bot, group_text(155, "-минрег", telegram_id=MODERATOR_ID))
+    assert (await config_of(app)).minreg_days is None
+
+    await app.dispatcher.feed_update(app.bot, group_text(156, "+автокик 3 60 бан", telegram_id=MODERATOR_ID))
+    config = await config_of(app)
+    assert config.autokick_count == 3 and config.autokick_action == "бан"
+    await app.dispatcher.feed_update(app.bot, group_text(157, "+входы", telegram_id=MODERATOR_ID))
+    assert (await config_of(app)).notify_joins is True
+
+
+async def test_grid_telegram_admins_and_topic_lock(app):
+    await app.dispatcher.feed_update(app.bot, group_text(158, "дк установить сетку Тест",
+                                                         telegram_id=OWNER_ID))
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, group_text(159, "сетка тг админ Модератор @player",
+                                                         telegram_id=OWNER_ID))
+    reply = await last_reply(app)
+    assert "назначен" in reply and "1 чатах" in reply
+    names = app.session.call_names
+    assert "PromoteChatMember" in names and "SetChatAdministratorCustomTitle" in names
+
+    await app.dispatcher.feed_update(app.bot, group_text(160, "сетка тг права @player",
+                                                         telegram_id=OWNER_ID))
+    assert "Статус" in await last_reply(app)
+
+    await app.dispatcher.feed_update(app.bot, group_text(161, "-топик", telegram_id=MODERATOR_ID))
+    assert "работает в топике" in await last_reply(app)
+
+
+async def test_topic_is_closed_inside_a_topic(app):
+    update = Update(update_id=162, message=Message(
+        message_id=162, date=datetime.now(timezone.utc), message_thread_id=7,
+        chat=Chat(id=GROUP_ID, type="supergroup", title="Mellow", is_forum=True),
+        from_user=TelegramUser(id=MODERATOR_ID, is_bot=False, first_name="Moderator"),
+        text="+топик"))
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, update)
+    assert "CloseForumTopic" in app.session.call_names
+    assert "закрыт" in await last_reply(app)
+
+    update = Update(update_id=163, message=Message(
+        message_id=163, date=datetime.now(timezone.utc), message_thread_id=7,
+        chat=Chat(id=GROUP_ID, type="supergroup", title="Mellow", is_forum=True),
+        from_user=TelegramUser(id=MODERATOR_ID, is_bot=False, first_name="Moderator"),
+        text="-топик"))
+    app.session.calls.clear()
+    await app.dispatcher.feed_update(app.bot, update)
+    assert "ReopenForumTopic" in app.session.call_names

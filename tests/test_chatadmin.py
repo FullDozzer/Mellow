@@ -47,12 +47,19 @@ def build_settings() -> Settings:
 class AdminSession(RecordingSession):
     """Adds the replies Telegram returns for moderation and membership calls."""
 
+    # Участник 777 отвечает как удалённый аккаунт: нужен для «кто удалён».
+    DELETED_ACCOUNT_ID = 777
+
     async def make_request(self, bot, method, timeout=None):
         name = type(method).__name__
         if name in {"GetChatMember", "GetChat"}:
             self.calls.append(method)
+            user_id = getattr(method, "user_id", None)
+            first_name = "Deleted Account" if user_id == self.DELETED_ACCOUNT_ID else "Member"
             return SimpleNamespace(status="member", can_send_messages=True, is_forum=False,
-                                   id=getattr(method, "chat_id", 0), title="Mellow", username=None)
+                                   id=getattr(method, "chat_id", 0), title="Mellow", username=None,
+                                   user=SimpleNamespace(id=user_id or 0, is_bot=False,
+                                                        first_name=first_name, last_name=None))
         if name == "GetMe":
             self.calls.append(method)
             return SimpleNamespace(id=42, is_bot=True, first_name="Mellow", username="mellow_bot")
