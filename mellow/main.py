@@ -13,6 +13,7 @@ from mellow.db import create_database, create_schema
 from mellow.handlers import router
 from mellow.middleware import PrivacySafeMessageCounter, outbox_worker
 from mellow.minecraft import MinecraftClient
+from mellow.preflight import report_configuration
 from mellow.services import apply_staff_configuration
 
 
@@ -24,6 +25,9 @@ async def main():
     await create_schema(engine)
     await apply_staff_configuration(session_factory, settings)
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # A wrong chat ID or a missing "manage topics" right is the usual reason a working
+    # bot seems to lose applications; say it out loud instead of failing silently.
+    await report_configuration(bot, settings)
     dispatcher = Dispatcher()
     dispatcher["settings"] = settings
     dispatcher["session_factory"] = session_factory
